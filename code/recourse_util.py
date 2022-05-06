@@ -24,10 +24,10 @@ def update_dataset(dataset, factuals, counterfactuals):
     #         fac_ind.append(index)
     #     for index, row in counterfactuals.iterrows():
     #         dataset.loc[index] = counterfactuals.loc[index]
-
-    for ((i_f, r_f), (i_c, r_c)) in zip(factuals.iterrows(), counterfactuals.iterrows()):
-        if len(counterfactuals.loc[i_c].dropna()) > 0:
-            dataset.loc[i_f] = counterfactuals.loc[i_c]
+    for df in [dataset._df, dataset._df_test, dataset._df_train]:
+        for ((i_f, r_f), (i_c, r_c)) in zip(factuals.iterrows(), counterfactuals.iterrows()):
+            if len(counterfactuals.loc[i_c].dropna()) > 0 and i_f in df.index:
+                df.loc[i_f] = counterfactuals.loc[i_c]
 
 
 def train_recourse_method(dataset, model, data_name, method, hyperparams=None):
