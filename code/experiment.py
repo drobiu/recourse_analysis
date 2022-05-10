@@ -1,7 +1,10 @@
+import datetime
+import json
 import warnings
 from copy import deepcopy
 from typing import Dict, List, Tuple
 
+import carla
 import imageio
 import timeit
 import numpy as np
@@ -23,7 +26,7 @@ from recourse_util import update_dataset, predict
 warnings.filterwarnings("ignore")
 
 
-def train_model(dataset: Data, training_params: Dict) -> MLModelCatalog:
+def train_model(dataset: Data, training_params: Dict = None) -> MLModelCatalog:
     """
     Trains a new model on a given dataset.
     :param dataset: The dataset to train the model on.
@@ -36,7 +39,7 @@ def train_model(dataset: Data, training_params: Dict) -> MLModelCatalog:
     model = MLModelCatalog(
         dataset,
         model_type="ann",
-        load_online=(dataset.data_name != 'custom'),
+        load_online=(not isinstance(dataset, CsvCatalog)),
         backend="pytorch"
     )
 
@@ -53,7 +56,7 @@ def train_model(dataset: Data, training_params: Dict) -> MLModelCatalog:
 
 def train_recourse_method(
         method: str, model: MLModel, dataset=None, data_name=None, hyperparams=None
-                          ) -> RecourseMethod:
+) -> RecourseMethod:
     """
     Train a new recourse generator object.
     :param method: Lowercase name of the recourse generator method.
@@ -102,34 +105,6 @@ def draw(data: DataFrame, features: List, target: str):
     plt.show()
 
 
-def get_factuals(dataset: Data, sample_num: int = 5, max_m_iter: int = 3) -> Tuple[MLModel, DataFrame]:
-    """
-    Computes the factuals as negative target class instances predicted by the model.
-    Retrains the model until the prediction yields at least a set amount of
-    data points or the max iterations number is reached.
-    :param dataset: The dataset to predict the factuals.
-    :param sample_num: Minimal amount of factuals.
-    :param max_m_iter: Max iteration number.
-    :return: DataFrame containing the factuals.
-    """
-    m_iter = 0
-
-    # Train a new MLModel
-    model = train_model(dataset)
-    # Predict factuals
-    factuals = predict_negative_instances(model, dataset._df)
-    n_factuals = len(factuals)
-    # If not enough factuals generated and the max amount of
-    # iterations not reached, retrain model and try again
-    while m_iter < max_m_iter and n_factuals < sample_num:
-        model = train_model(dataset)
-        factuals = predict_negative_instances(model, dataset._df)
-        n_factuals = len(factuals)
-        m_iter += 1
-
-    return model, factuals
-
-
 def get_empty_results() -> Dict:
     """
     Generate a Dict for storing experiment results in.
@@ -152,7 +127,7 @@ def add_data_statistics(model: MLModel, dataset: Data, results: Dict):
     :param dataset: Current dataset object.
     :param results: Results Dict.
     """
-    results['datasets'].append(dataset._df.copy())
+    results['datasets'].append(dataset.df)
     results['means'].append(dataset._df[dataset.continuous].mean().to_numpy())
     results['covariances'].append(dataset._df[dataset.continuous].cov().to_numpy())
     results['clustering'].append(find_elbow(dataset))
@@ -178,6 +153,14 @@ def find_elbow(dataset: Data, n: int = 10):
     return ch_metrics.index(np.max(ch_metrics)) + 2
 
 
+def get_timestamp():
+    """
+    Generates a timestamp for use in experiment identification.
+    """
+    time = datetime.datetime.now()
+    return f"{time.day}{time.hour}{time.minute}"
+
+
 class CustomBenchmark(Benchmark):
     """
     Custom benchmark class extending the carla.evaluation.benchmark.Benchmark class
@@ -197,6 +180,7 @@ class CustomBenchmark(Benchmark):
     timer: int
         Amount of time used by recourse_method to generate the counterfactuals in seconds.
     """
+
     def __init__(
             self,
             mlmodel: MLModel,
@@ -237,9 +221,12 @@ class Experiment:
     save_gifs:
         Uses generate_animation to automatically generate gifs of the recourse for both generators.
     """
+
     def __init__(self):
-        self._iter_id = 0
+
+        self._iter_id = get_timestamp()
         self._data_path = 'datasets/bimodal_dataset_1.csv'
+        self._logger = carla.get_logger(Experiment.__name__)
 
         self._features = []
         self._dataset_name = None
@@ -280,7 +267,7 @@ class Experiment:
         self._features = [*dataset.continuous, *dataset.categorical]
         self._dataset = dataset
 
-    def run_experiment(self):
+    def run_experiment(self, save_output=False, iterations=35, samples=2):
         """
         Runs the experiment using the CLUE and Wachter recourse generators on a set amount of
         epochs and a set amount of counterfactuals per epoch. The experiment uses the dataset
@@ -289,10 +276,8 @@ class Experiment:
         TODO: Parameterize the method
         """
         if not self._dataset:
-            os.error("Load a dataset before running experiments.")
+            self._logger.error("Load a dataset before running experiments.")
             return
-
-        self._iter_id += 1
 
         clue_dataset = deepcopy(self._dataset)
         clue_result = get_empty_results()
@@ -302,12 +287,14 @@ class Experiment:
         wachter_result = get_empty_results()
         self.results['wachter'] = wachter_result
 
-        iterations = 7
-        samples = 10
+        self.results['metadata'] = {'iterations': iterations, 'samples': samples}
+
+        self._logger.info(f'Starting experiment sequence with {iterations} iterations with {samples} samples.')
 
         for i in range(iterations):
-            clue_model, clue_factuals = get_factuals(clue_dataset, sample_num=samples)
-            wachter_model, wachter_factuals = get_factuals(wachter_dataset, sample_num=samples)
+            self._logger.info(f'Experiment iteration [{i+1}/{iterations}]:')
+            clue_model, clue_factuals = self.get_factuals(clue_dataset, sample_num=samples)
+            wachter_model, wachter_factuals = self.get_factuals(wachter_dataset, sample_num=samples)
 
             factuals = pd.merge(clue_factuals, wachter_factuals, how='inner', on=list(self._dataset._df.columns))
             factuals = pd.merge(factuals, self._dataset._df, how='inner', on=list(self._dataset._df.columns))
@@ -315,8 +302,13 @@ class Experiment:
             if len(factuals) > samples:
                 factuals = factuals.sample(samples)
 
+            self._logger.info(f'Number of factuals: {len(factuals)}')
+
             self._execute_experiment_iteration('clue', clue_dataset, clue_model, factuals, clue_result)
             self._execute_experiment_iteration('wachter', wachter_dataset, wachter_model, factuals, wachter_result)
+
+        if save_output:
+            self.save_results()
 
     def _execute_experiment_iteration(
             self, method: str, dataset: Data, model: MLModel, factuals: DataFrame, results: Dict, draw_state=False
@@ -336,17 +328,18 @@ class Experiment:
 
         :return: The updated Data object.
         """
-        print("Number of factuals", len(factuals))
 
         if method == 'clue':
             rm = train_recourse_method('clue', model, dataset, data_name=self._dataset_name)
         else:
             rm = train_recourse_method('wachter', model)
 
+        self._logger.info(f'Generating counterfactuals with {method}.')
+
         start = timeit.default_timer()
         counterfactuals = rm.get_counterfactuals(factuals)
         stop = timeit.default_timer()
-        print("Number of counterfactuals:", len(counterfactuals.dropna()))
+        self._logger.info(f'Number of counterfactuals: {len(counterfactuals.dropna())}')
 
         update_dataset(dataset, factuals, counterfactuals)
 
@@ -359,6 +352,35 @@ class Experiment:
             draw(dataset._df, self._features[:2], self._dataset.target)
 
         return dataset
+
+    def get_factuals(self, dataset: Data, sample_num: int = 5, max_m_iter: int = 3) -> Tuple[MLModel, DataFrame]:
+        """
+        Computes the factuals as negative target class instances predicted by the model.
+        Retrains the model until the prediction yields at least a set amount of
+        data points or the max iterations number is reached.
+        :param dataset: The dataset to predict the factuals.
+        :param sample_num: Minimal amount of factuals.
+        :param max_m_iter: Max iteration number.
+        :return: Tuple[MLModel, DataFrame] containing the newly trained model and the factuals.
+        """
+        m_iter = 0
+
+        # Train a new MLModel
+        self._logger.info('Training model.')
+        model = train_model(dataset)
+        # Predict factuals
+        factuals = predict_negative_instances(model, dataset._df)
+        n_factuals = len(factuals)
+        # If not enough factuals generated and the max amount of
+        # iterations not reached, retrain model and try again
+        while m_iter < max_m_iter and n_factuals < sample_num:
+            self._logger.info(f'Not enough factuals found, retraining [{m_iter+1}/{max_m_iter}]')
+            model = train_model(dataset)
+            factuals = predict_negative_instances(model, dataset._df)
+            n_factuals = len(factuals)
+            m_iter += 1
+
+        return model, factuals
 
     def generate_animation(self, results, method='clue', features=None):
         """
@@ -386,7 +408,7 @@ class Experiment:
                 image = imageio.v3.imread(filename)
                 writer.append_data(image)
 
-        print(f"Saved gif to {gif_path}")
+        self._logger.info(f"Saved gif to {gif_path}")
 
         for filename in set(names):
             os.remove(filename)
@@ -399,13 +421,25 @@ class Experiment:
         self.generate_animation(self.results, 'clue')
         self.generate_animation(self.results, 'wachter')
 
+    def save_results(self, path=None):
+        """
+        Save the results Dict to a file.
+        """
+        if not path:
+            path = f'results/{self._iter_id}.json'
+
+        with open(path, 'w+') as file:
+            file.write(json.dumps(self.results))
+
+        self._logger.info(f'Saved results to {path}')
+
 
 if __name__ == "__main__":
     experiment = Experiment()
     experiment.load_dataset(
         "custom",
-                            path='datasets/bimodal_dataset_1.csv', continuous=['feature1', 'feature2'], target='target'
-                            )
+        path='datasets/bimodal_dataset_1.csv', continuous=['feature1', 'feature2'], target='target'
+    )
     experiment.run_experiment()
     experiment.save_gifs()
     print(experiment.results)
