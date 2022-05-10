@@ -1,5 +1,6 @@
 import warnings
 from copy import deepcopy
+from typing import Dict, List, Tuple
 
 import imageio
 import timeit
@@ -9,10 +10,11 @@ import pandas as pd
 import os
 
 from carla.data.catalog import CsvCatalog, OnlineCatalog
-from carla import MLModelCatalog
+from carla import MLModelCatalog, Data, RecourseMethod, MLModel
 from carla.recourse_methods import Clue, Wachter
 from carla.models.negative_instances import predict_negative_instances
 from carla.evaluation.benchmark import Benchmark
+from pandas import DataFrame
 from sklearn.metrics import f1_score, accuracy_score
 from sklearn.cluster import KMeans
 from sklearn import metrics
@@ -21,13 +23,20 @@ from recourse_util import update_dataset, predict
 warnings.filterwarnings("ignore")
 
 
-def train_model(dataset):
-    training_params = {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [5]}
+def train_model(dataset: Data, training_params: Dict) -> MLModelCatalog:
+    """
+    Trains a new model on a given dataset.
+    :param dataset: The dataset to train the model on.
+    :param training_params: The hyperparameters used during training.
+    :return: Newly trained MLModel object.
+    """
+    if not training_params:
+        training_params = {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [5, 4]}
 
     model = MLModelCatalog(
         dataset,
-        model_type="linear",
-        load_online=False,
+        model_type="ann",
+        load_online=(dataset.data_name != 'custom'),
         backend="pytorch"
     )
 
@@ -42,10 +51,20 @@ def train_model(dataset):
     return model
 
 
-def train_recourse_method(method, model, dataset=None, data_name=None, hyperparams=None):
-    rm = None
+def train_recourse_method(
+        method: str, model: MLModel, dataset=None, data_name=None, hyperparams=None
+                          ) -> RecourseMethod:
+    """
+    Train a new recourse generator object.
+    :param method: Lowercase name of the recourse generator method.
+    :param model: MLModel to train the method on.
+    :param dataset: Optional Data to train the method on.
+    :param data_name: Name of the dataset.
+    :param hyperparams: Hyperparameters used by the recourse generator.
+    :return: Newly trained recourse generator.
+    """
     if method == "clue":
-        hyperparams = {
+        if not hyperparams: hyperparams = {
             "data_name": data_name,
             "train_vae": True,
             "width": 10,
@@ -61,7 +80,7 @@ def train_recourse_method(method, model, dataset=None, data_name=None, hyperpara
         rm = Clue(dataset, model, hyperparams)
 
     else:
-        hyperparams = {
+        if not hyperparams: hyperparams = {
             "loss_type": "BCE",
             "t_max_min": 0.5 / 60
         }
@@ -72,16 +91,36 @@ def train_recourse_method(method, model, dataset=None, data_name=None, hyperpara
     return rm
 
 
-def draw(data, features, target):
+def draw(data: DataFrame, features: List, target: str):
+    """
+    Draw the data using pyplot scatterplot.
+    :param data: Data to be plotted.
+    :param features: List of data feature names.
+    :param target: Target class.
+    """
     plt.scatter(data[features[0]], data[features[1]], c=data[target])
     plt.show()
 
 
-def get_factuals(dataset, sample_num=5, max_m_iter=3):
+def get_factuals(dataset: Data, sample_num: int = 5, max_m_iter: int = 3) -> Tuple[MLModel, DataFrame]:
+    """
+    Computes the factuals as negative target class instances predicted by the model.
+    Retrains the model until the prediction yields at least a set amount of
+    data points or the max iterations number is reached.
+    :param dataset: The dataset to predict the factuals.
+    :param sample_num: Minimal amount of factuals.
+    :param max_m_iter: Max iteration number.
+    :return: DataFrame containing the factuals.
+    """
     m_iter = 0
+
+    # Train a new MLModel
     model = train_model(dataset)
+    # Predict factuals
     factuals = predict_negative_instances(model, dataset._df)
     n_factuals = len(factuals)
+    # If not enough factuals generated and the max amount of
+    # iterations not reached, retrain model and try again
     while m_iter < max_m_iter and n_factuals < sample_num:
         model = train_model(dataset)
         factuals = predict_negative_instances(model, dataset._df)
@@ -91,7 +130,10 @@ def get_factuals(dataset, sample_num=5, max_m_iter=3):
     return model, factuals
 
 
-def get_empty_results():
+def get_empty_results() -> Dict:
+    """
+    Generate a Dict for storing experiment results in.
+    """
     return {
         'datasets': [],
         'means': [],
@@ -103,7 +145,13 @@ def get_empty_results():
     }
 
 
-def add_data_statistics(model, dataset, results):
+def add_data_statistics(model: MLModel, dataset: Data, results: Dict):
+    """
+    Append the newest experiment statistics to the results Dict.
+    :param model: Current MLModel.
+    :param dataset: Current dataset object.
+    :param results: Results Dict.
+    """
     results['datasets'].append(dataset._df.copy())
     results['means'].append(dataset._df[dataset.continuous].mean().to_numpy())
     results['covariances'].append(dataset._df[dataset.continuous].cov().to_numpy())
@@ -112,7 +160,14 @@ def add_data_statistics(model, dataset, results):
     results['f1_scores'].append(f1_score(np.array(dataset._df[dataset.target]), predict(model, dataset)))
 
 
-def find_elbow(dataset, n=10):
+def find_elbow(dataset: Data, n: int = 10):
+    """
+    Find the amount of clusters existing in the dataset using the Caliński-Harabasz
+    elbow finding metric in KMeans clustering.
+    :param dataset: Current dataset.
+    :param n: Number of clusters to consider.
+    :return: Calculated number of clusters.
+    """
     ch_metrics = []
     x = dataset.df[dataset.continuous]
 
@@ -124,14 +179,32 @@ def find_elbow(dataset, n=10):
 
 
 class CustomBenchmark(Benchmark):
+    """
+    Custom benchmark class extending the carla.evaluation.benchmark.Benchmark class
+    allowing for setting the counterfactuals to be benchmarked and the timings
+    in the class constructor.
+
+    Parameters
+    ----------
+    mlmodel: MLModel
+        ML model used by the benchmarking methods.
+    recourse_method: RecourseMethod
+        Recourse method evaluated in the benchmark.
+    factuals: DataFrame
+        Factual instances used in the recourse process.
+    counterfactuals: DataFrame
+        Counterfactual instances generated by recourse_method
+    timer: int
+        Amount of time used by recourse_method to generate the counterfactuals in seconds.
+    """
     def __init__(
             self,
-            mlmodel,
-            recourse_method,
-            factuals: pd.DataFrame,
-            counterfactuals: pd.DataFrame,
-            timer
-    ) -> None:
+            mlmodel: MLModel,
+            recourse_method: RecourseMethod,
+            factuals: DataFrame,
+            counterfactuals: DataFrame,
+            timer: int
+    ):
         self._mlmodel = mlmodel
         self._recourse_method = recourse_method
         self._factuals = factuals.copy()
@@ -145,8 +218,26 @@ class CustomBenchmark(Benchmark):
 
 
 class Experiment:
+    """
+    The experiment class used for setting up, running and evaluating experiments.
+
+    Parameters
+    ----------
+    TODO: Parameterize the class
+
+    Methods
+    -------
+    load_dataset:
+        Loads the dataset used in the experiments.
+        Has to be called before running any experiments.
+    run_experiment:
+        Runs the experiment sequence with a set amount of iterations and counterfactuals, on a set dataset.
+    generate_animation:
+        Generates animations using results of a given method.
+    save_gifs:
+        Uses generate_animation to automatically generate gifs of the recourse for both generators.
+    """
     def __init__(self):
-        self.num = 10
         self._iter_id = 0
         self._data_path = 'datasets/bimodal_dataset_1.csv'
 
@@ -156,9 +247,50 @@ class Experiment:
 
         self.results = {}
 
+    def load_dataset(self, name, **kwargs):
+        """
+        Loads a dataset of a specified name. Use 'custom' if loading a custom dataset.
+        :param name: Str containing the name of the dataset.
+            'custom' when loading a custom dataset.
+        :param kwargs: If using a custom dataset: A Dict containing the parameters of the dataset.
+            The dict should be of the following form:
+            {
+                'path': a string containing the dataset path
+                'categorical': a list of strings corresponding to the names of
+                    the categorical features of the dataset.
+                'continuous': a list of strings corresponding to the names of
+                    the continuous features of the dataset.
+                'immutable': a list of strings corresponding to the names of
+                    the immutable features of the dataset.
+                'target': a string containing the name of the target feature of the dataset.
+            }
+        """
+        if name == 'custom':
+            dataset = CsvCatalog(
+                file_path=kwargs.pop('path'),
+                categorical=kwargs.pop('categorical', []),
+                continuous=kwargs.pop('continuous', []),
+                immutables=kwargs.pop('immutables', []),
+                target=kwargs.pop('target')
+            )
+        else:
+            dataset = OnlineCatalog(name)
+
+        self._dataset_name = name
+        self._features = [*dataset.continuous, *dataset.categorical]
+        self._dataset = dataset
+
     def run_experiment(self):
+        """
+        Runs the experiment using the CLUE and Wachter recourse generators on a set amount of
+        epochs and a set amount of counterfactuals per epoch. The experiment uses the dataset
+        set by the load_dataset method.
+        :param:
+        TODO: Parameterize the method
+        """
         if not self._dataset:
-            print("Load a dataset before running experiments")
+            os.error("Load a dataset before running experiments.")
+            return
 
         self._iter_id += 1
 
@@ -170,8 +302,8 @@ class Experiment:
         wachter_result = get_empty_results()
         self.results['wachter'] = wachter_result
 
-        iterations = 5
-        samples = 5
+        iterations = 7
+        samples = 10
 
         for i in range(iterations):
             clue_model, clue_factuals = get_factuals(clue_dataset, sample_num=samples)
@@ -183,10 +315,27 @@ class Experiment:
             if len(factuals) > samples:
                 factuals = factuals.sample(samples)
 
-            self.execute_experiment_iteration('clue', clue_dataset, clue_model, factuals, clue_result)
-            self.execute_experiment_iteration('wachter', wachter_dataset, wachter_model, factuals, wachter_result)
+            self._execute_experiment_iteration('clue', clue_dataset, clue_model, factuals, clue_result)
+            self._execute_experiment_iteration('wachter', wachter_dataset, wachter_model, factuals, wachter_result)
 
-    def execute_experiment_iteration(self, method, dataset, model, factuals, results, draw_state=False):
+    def _execute_experiment_iteration(
+            self, method: str, dataset: Data, model: MLModel, factuals: DataFrame, results: Dict, draw_state=False
+    ):
+        """
+        Executes a single iteration of the experiment. Trains a recourse method on the MLModel returned
+        by get_factuals and the Data set by load_dataset. Uses the recourse method to generate counterfactuals,
+        times the recourse generator, saves the recourse data to the results Dict using add_data_statistics,
+        generates a benchmark and updates the dataset using update_dataset.
+
+        :param method: Name of the recourse method.
+        :param dataset: Data object used in the experiment iteration.
+        :param model: MLModel used in the experiment iteration.
+        :param factuals: DataFrame containing factuals.
+        :param results: Results Dict to save the experiment results to.
+        :param draw_state: Flag defining whether to show a plot of the current state of the dataset.
+
+        :return: The updated Data object.
+        """
         print("Number of factuals", len(factuals))
 
         if method == 'clue':
@@ -211,23 +360,13 @@ class Experiment:
 
         return dataset
 
-    def load_dataset(self, name, **kwargs):
-        if name == 'custom':
-            dataset = CsvCatalog(
-                file_path=kwargs.pop('path'),
-                categorical=kwargs.pop('categorical', []),
-                continuous=kwargs.pop('continuous', []),
-                immutables=kwargs.pop('immutables', []),
-                target=kwargs.pop('target')
-            )
-        else:
-            dataset = OnlineCatalog(name)
-
-        self._dataset_name = name
-        self._features = [*dataset.continuous, *dataset.categorical]
-        self._dataset = dataset
-
     def generate_animation(self, results, method='clue', features=None):
+        """
+        Generates an animation using data in results for a set recourse method.
+        :param results: Results Dict to be used in the animation.
+        :param method: Recourse method name.
+        :param features: List of two strings containing the names of features to be plotted.
+        """
         data = results[method]['datasets']
 
         if not features:
@@ -253,13 +392,20 @@ class Experiment:
             os.remove(filename)
 
     def save_gifs(self):
+        """
+        Uses generate_animation to save gifs depicting the recourse process.
+        :return:
+        """
         self.generate_animation(self.results, 'clue')
         self.generate_animation(self.results, 'wachter')
 
 
 if __name__ == "__main__":
     experiment = Experiment()
-    experiment.load_dataset("custom", path='datasets/bimodal_dataset_1.csv', continuous=['feature1', 'feature2'], target='target')
+    experiment.load_dataset(
+        "custom",
+                            path='datasets/bimodal_dataset_1.csv', continuous=['feature1', 'feature2'], target='target'
+                            )
     experiment.run_experiment()
     experiment.save_gifs()
     print(experiment.results)
