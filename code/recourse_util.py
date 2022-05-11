@@ -32,7 +32,7 @@ def update_dataset(dataset, factuals, counterfactuals):
 
 def train_recourse_method(dataset, model, data_name, method, hyperparams=None):
     rm = None
-    if method == "clue":
+    if method == "CLUE":
         if hyperparams is None:
             hyperparams = {
                 "data_name": data_name,

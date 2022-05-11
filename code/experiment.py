@@ -34,7 +34,7 @@ def train_model(dataset: Data, training_params: Dict = None) -> MLModelCatalog:
     :return: Newly trained MLModel object.
     """
     if not training_params:
-        training_params = {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [5, 4]}
+        training_params = {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [4]}
 
     model = MLModelCatalog(
         dataset,
@@ -66,7 +66,7 @@ def train_recourse_method(
     :param hyperparams: Hyperparameters used by the recourse generator.
     :return: Newly trained recourse generator.
     """
-    if method == "clue":
+    if method == 'CLUE':
         if not hyperparams: hyperparams = {
             "data_name": data_name,
             "train_vae": True,
@@ -116,7 +116,8 @@ def get_empty_results() -> Dict:
         'clustering': [],
         'accuracies': [],
         'f1_scores': [],
-        'benchmark': []
+        'benchmark': [],
+        'probabilities': [],
     }
 
 
@@ -231,6 +232,7 @@ class Experiment:
         self._features = []
         self._dataset_name = None
         self._dataset = None
+        self._used_factuals_indices = set()
 
         self.results = {}
 
@@ -281,15 +283,18 @@ class Experiment:
 
         clue_dataset = deepcopy(self._dataset)
         clue_result = get_empty_results()
-        self.results['clue'] = clue_result
+        self.results['CLUE'] = clue_result
 
         wachter_dataset = deepcopy(self._dataset)
         wachter_result = get_empty_results()
-        self.results['wachter'] = wachter_result
+        self.results['Wachter'] = wachter_result
 
         self.results['metadata'] = {'iterations': iterations, 'samples': samples}
 
-        self._logger.info(f'Starting experiment sequence with {iterations} iterations with {samples} samples.')
+        for method in ['CLUE', 'Wachter']:
+            self.results[method]['datasets'].append(self._dataset.df)
+
+        self._logger.info(f'Starting experiment sequence with {iterations} iterations and {samples} samples.')
 
         for i in range(iterations):
             self._logger.info(f'Experiment iteration [{i+1}/{iterations}]:')
@@ -298,14 +303,20 @@ class Experiment:
 
             factuals = pd.merge(clue_factuals, wachter_factuals, how='inner', on=list(self._dataset._df.columns))
             factuals = pd.merge(factuals, self._dataset._df, how='inner', on=list(self._dataset._df.columns))
+            factuals = factuals.drop(index=self._used_factuals_indices, errors='ignore')
 
+            print(len(factuals))
             if len(factuals) > samples:
                 factuals = factuals.sample(samples)
+            if len(factuals) == 0:
+                continue
+
+            self._used_factuals_indices.update(list(factuals.index))
 
             self._logger.info(f'Number of factuals: {len(factuals)}')
 
-            self._execute_experiment_iteration('clue', clue_dataset, clue_model, factuals, clue_result)
-            self._execute_experiment_iteration('wachter', wachter_dataset, wachter_model, factuals, wachter_result)
+            self._execute_experiment_iteration('CLUE', clue_dataset, clue_model, factuals, clue_result)
+            self._execute_experiment_iteration('Wachter', wachter_dataset, wachter_model, factuals, wachter_result)
 
         if save_output:
             self.save_results()
@@ -329,10 +340,10 @@ class Experiment:
         :return: The updated Data object.
         """
 
-        if method == 'clue':
-            rm = train_recourse_method('clue', model, dataset, data_name=self._dataset_name)
+        if method == 'CLUE':
+            rm = train_recourse_method('CLUE', model, dataset, data_name=self._dataset_name)
         else:
-            rm = train_recourse_method('wachter', model)
+            rm = train_recourse_method('Wachter', model)
 
         self._logger.info(f'Generating counterfactuals with {method}.')
 
@@ -345,6 +356,8 @@ class Experiment:
 
         benchmark = CustomBenchmark(model, rm, factuals, counterfactuals, stop - start)
         results['benchmark'].append(benchmark.run_benchmark())
+
+        results['probabilities'].append(self.get_probability_range(model))
 
         add_data_statistics(model, dataset, results)
 
@@ -382,7 +395,18 @@ class Experiment:
 
         return model, factuals
 
-    def generate_animation(self, results, method='clue', features=None):
+    def get_probability_range(self, model: MLModel) -> List:
+        """
+        Return mean and variance of the predicted probabilities of the original positive class.
+        :param model: MLModel to predict the probabilities with.
+        :return: List[mean, variance]
+        """
+        positive = self._dataset.df.where(self._dataset.df[self._dataset.target] == 1)
+        positive = positive.drop(index=self._used_factuals_indices, errors='ignore')
+        prob = model.predict_proba(positive.dropna())
+        return [np.mean(prob[:, 1]), np.var(prob[:, 1])]
+
+    def generate_animation(self, results: Dict, method='CLUE', features=None):
         """
         Generates an animation using data in results for a set recourse method.
         :param results: Results Dict to be used in the animation.
@@ -398,10 +422,14 @@ class Experiment:
 
         for i, name in enumerate(names):
             plt.scatter(data[i][features[0]], data[i][features[1]], c=data[i][self._dataset.target])
+            plt.text(0, 0, self._dataset_name, ha='left', va='center')
+            plt.text(1, 1, f"Epoch {i}/{results['metadata']['iterations']}", ha='right', va='center')
+            plt.text(0, 1, method, ha='left', va='center')
+            plt.text(1, 0, f"{results['metadata']['samples']} samples/epoch", ha='right', va='center')
             plt.savefig(name)
             plt.close()
 
-        gif_path = f"gifs/{method}_gif_{self._iter_id}.gif"
+        gif_path = f"gifs/{self._iter_id}_{method}_gif.gif"
 
         with imageio.get_writer(f'{gif_path}', mode='I') as writer:
             for filename in names:
@@ -418,8 +446,8 @@ class Experiment:
         Uses generate_animation to save gifs depicting the recourse process.
         :return:
         """
-        self.generate_animation(self.results, 'clue')
-        self.generate_animation(self.results, 'wachter')
+        self.generate_animation(self.results, 'CLUE')
+        self.generate_animation(self.results, 'Wachter')
 
     def save_results(self, path=None):
         """
@@ -428,8 +456,15 @@ class Experiment:
         if not path:
             path = f'results/{self._iter_id}.json'
 
+        out = {}
+        for i in self.results:
+            out[i] = {}
+            for j in self.results[i]:
+                if j != 'datasets':
+                    out[i][j] = self.results[i][j]
+
         with open(path, 'w+') as file:
-            file.write(json.dumps(self.results))
+            file.write(json.dumps(out))
 
         self._logger.info(f'Saved results to {path}')
 
@@ -438,8 +473,8 @@ if __name__ == "__main__":
     experiment = Experiment()
     experiment.load_dataset(
         "custom",
-        path='datasets/bimodal_dataset_1.csv', continuous=['feature1', 'feature2'], target='target'
+        path='datasets/unimodal_dataset_1.csv', continuous=['feature1', 'feature2'], target='target'
     )
-    experiment.run_experiment()
+    experiment.run_experiment(iterations=7, samples=10)
     experiment.save_gifs()
     print(experiment.results)
