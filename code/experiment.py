@@ -22,6 +22,7 @@ from sklearn.metrics import f1_score, accuracy_score
 from sklearn.cluster import KMeans
 from sklearn import metrics
 from recourse_util import update_dataset, predict
+from kneed import KneeLocator
 
 warnings.filterwarnings("ignore")
 
@@ -34,7 +35,7 @@ def train_model(dataset: Data, training_params: Dict = None) -> MLModelCatalog:
     :return: Newly trained MLModel object.
     """
     if not training_params:
-        training_params = {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [4]}
+        training_params = {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [5]}
 
     model = MLModelCatalog(
         dataset,
@@ -73,9 +74,9 @@ def train_recourse_method(
             "width": 10,
             "depth": 3,
             "latent_dim": 12,
-            "batch_size": 20,
-            "epochs": 5,
-            "lr": 0.0001,
+            "batch_size": 5,
+            "epochs": 3,
+            "lr": 0.001,
             "early_stop": 20,
         }
 
@@ -85,7 +86,7 @@ def train_recourse_method(
     else:
         if not hyperparams: hyperparams = {
             "loss_type": "BCE",
-            "t_max_min": 0.5 / 60
+            "t_max_min": 3 / 60
         }
 
         # load a recourse model and pass black box model
@@ -118,10 +119,11 @@ def get_empty_results() -> Dict:
         'f1_scores': [],
         'benchmark': [],
         'probabilities': [],
+        'pred_data': [],
     }
 
 
-def add_data_statistics(model: MLModel, dataset: Data, results: Dict):
+def add_data_statistics(dataset: Data, results: Dict, model: MLModelCatalog = None):
     """
     Append the newest experiment statistics to the results Dict.
     :param model: Current MLModel.
@@ -134,6 +136,7 @@ def add_data_statistics(model: MLModel, dataset: Data, results: Dict):
     results['clustering'].append(find_elbow(dataset))
     results['accuracies'].append(accuracy_score(np.array(dataset._df[dataset.target]), predict(model, dataset)))
     results['f1_scores'].append(f1_score(np.array(dataset._df[dataset.target]), predict(model, dataset)))
+    results['probabilities'].append(model.predict(dataset.df).flatten())
 
 
 def find_elbow(dataset: Data, n: int = 10):
@@ -146,12 +149,18 @@ def find_elbow(dataset: Data, n: int = 10):
     """
     ch_metrics = []
     x = dataset.df[dataset.continuous]
+    clusters = []
+    entropy = []
 
     for i in range(2, n):
         model = KMeans(n_clusters=i, random_state=1).fit(x)
+        clusters.append(i)
+        entropy.append(model.inertia_)
         ch_metrics.append(metrics.calinski_harabasz_score(x, model.labels_))
 
-    return ch_metrics.index(np.max(ch_metrics)) + 2
+    return KneeLocator(clusters, entropy, S=1.0, curve="convex", direction="decreasing").elbow
+
+    # return ch_metrics.index(np.max(ch_metrics)) + 2
 
 
 def get_timestamp():
@@ -159,7 +168,7 @@ def get_timestamp():
     Generates a timestamp for use in experiment identification.
     """
     time = datetime.datetime.now()
-    return f"{time.day}{time.hour}{time.minute}"
+    return f"{time.day:02d}{time.hour:02d}{time.minute:02d}"
 
 
 class CustomBenchmark(Benchmark):
@@ -228,11 +237,14 @@ class Experiment:
         self._iter_id = get_timestamp()
         self._data_path = 'datasets/bimodal_dataset_1.csv'
         self._logger = carla.get_logger(Experiment.__name__)
+        self._out_count = 0
 
         self._features = []
         self._dataset_name = None
         self._dataset = None
         self._used_factuals_indices = set()
+        self._methods = ['CLUE', 'Wachter']
+        self._meshes = {k: [] for k in self._methods}
 
         self.results = {}
 
@@ -291,15 +303,18 @@ class Experiment:
 
         self.results['metadata'] = {'iterations': iterations, 'samples': samples}
 
-        for method in ['CLUE', 'Wachter']:
-            self.results[method]['datasets'].append(self._dataset.df)
+        # for method in self._methods:
+        #     self.results[method]['datasets'].append(self._dataset.df)
 
         self._logger.info(f'Starting experiment sequence with {iterations} iterations and {samples} samples.')
 
         for i in range(iterations):
             self._logger.info(f'Experiment iteration [{i+1}/{iterations}]:')
+
             clue_model, clue_factuals = self.get_factuals(clue_dataset, sample_num=samples)
             wachter_model, wachter_factuals = self.get_factuals(wachter_dataset, sample_num=samples)
+
+            self.update_meshes({'CLUE': clue_model, 'Wachter': wachter_model})
 
             factuals = pd.merge(clue_factuals, wachter_factuals, how='inner', on=list(self._dataset._df.columns))
             factuals = pd.merge(factuals, self._dataset._df, how='inner', on=list(self._dataset._df.columns))
@@ -317,6 +332,14 @@ class Experiment:
 
             self._execute_experiment_iteration('CLUE', clue_dataset, clue_model, factuals, clue_result)
             self._execute_experiment_iteration('Wachter', wachter_dataset, wachter_model, factuals, wachter_result)
+
+        clue_model, clue_factuals = self.get_factuals(clue_dataset, sample_num=samples)
+        wachter_model, wachter_factuals = self.get_factuals(wachter_dataset, sample_num=samples)
+
+        add_data_statistics(clue_dataset, self.results['CLUE'], clue_model)
+        add_data_statistics(wachter_dataset, self.results['Wachter'], wachter_model)
+
+        self.update_meshes({'CLUE': clue_model, 'Wachter': wachter_model})
 
         if save_output:
             self.save_results()
@@ -352,17 +375,17 @@ class Experiment:
         stop = timeit.default_timer()
         self._logger.info(f'Number of counterfactuals: {len(counterfactuals.dropna())}')
 
-        update_dataset(dataset, factuals, counterfactuals)
-
         benchmark = CustomBenchmark(model, rm, factuals, counterfactuals, stop - start)
         results['benchmark'].append(benchmark.run_benchmark())
 
-        results['probabilities'].append(self.get_probability_range(model))
+        results['pred_data'].append(self.get_probability_range(model))
 
-        add_data_statistics(model, dataset, results)
+        add_data_statistics(dataset, results, model)
+
+        update_dataset(dataset, factuals, counterfactuals)
 
         if draw_state:
-            draw(dataset._df, self._features[:2], self._dataset.target)
+            draw(dataset.df, self._features[:2], self._dataset.target)
 
         return dataset
 
@@ -406,7 +429,22 @@ class Experiment:
         prob = model.predict_proba(positive.dropna())
         return [np.mean(prob[:, 1]), np.var(prob[:, 1])]
 
-    def generate_animation(self, results: Dict, method='CLUE', features=None):
+    def update_meshes(self, models):
+        resolution = 100
+        for m in self._methods:
+            a = np.linspace(-0.1, 1.1, resolution)
+            xx, yy = np.meshgrid(a, a)
+
+            data = np.column_stack((xx.flatten(), yy.flatten()))
+
+            pred = models[m].predict(data)
+
+            def smoothstep(x):
+                return (1+1000000**(-x+0.5))**(-1)
+
+            self._meshes[m].append((xx, yy, smoothstep(pred)))
+
+    def generate_animation(self, results: Dict, method='CLUE', options=None, features=None):
         """
         Generates an animation using data in results for a set recourse method.
         :param results: Results Dict to be used in the animation.
@@ -418,36 +456,65 @@ class Experiment:
         if not features:
             features = self._features[:2]
 
-        names = [f"images/{method}{str(n)}.png" for n in range(len(data))]
+        names = [f"images/{method}{str(n)}_{self._iter_id}.png" for n in range(len(data))]
+        out_names = []
+
+        coloring_type = options.get('type', 'default')
+        
+        if coloring_type == 'default':
+            colors = [df[self._dataset.target] for df in data]
+        elif coloring_type == 'pred_class':
+            colors = [np.where(prob > 0.5, 1, 0) for prob in results[method]['probabilities']]
+        elif coloring_type == 'prob':
+            colors = results[method]['probabilities']
+
+        fpi = options.get('fpi', 3)
+        mesh = options.get('mesh', True)
 
         for i, name in enumerate(names):
-            plt.scatter(data[i][features[0]], data[i][features[1]], c=data[i][self._dataset.target])
-            plt.text(0, 0, self._dataset_name, ha='left', va='center')
-            plt.text(1, 1, f"Epoch {i}/{results['metadata']['iterations']}", ha='right', va='center')
-            plt.text(0, 1, method, ha='left', va='center')
-            plt.text(1, 0, f"{results['metadata']['samples']} samples/epoch", ha='right', va='center')
-            plt.savefig(name)
-            plt.close()
+            for n in range(fpi):
+                if mesh:
+                    xx, yy, pred = self._meshes[method][i]
+                    plt.contourf(xx, yy, pred.T[0].reshape(xx.shape[0], xx.shape[0]), levels=10)
+                plt.scatter(
+                    data[i][features[0]],
+                    data[i][features[1]],
+                    c=np.where(colors[i] > 0.5, '#c78f1e', '#0096f0'),
+                    edgecolors='black'
+                )
+                plt.text(0.2, -0.2, self._dataset_name, ha='left', va='center')
+                plt.text(1, 1.15, f"Epoch {i}/{results['metadata']['iterations']}", ha='right', va='center')
+                plt.text(0, 1.15, method, ha='left', va='center')
+                plt.text(.8, -0.2, f"{results['metadata']['samples']} samples/epoch", ha='right', va='center')
+                plt.ylim(-0.1, 1.1)
+                plt.xlim(-0.1, 1.1)
+                f_name = f'{name[:-4]}_{n}.png'
+                plt.savefig(f_name)
+                plt.close()
 
-        gif_path = f"gifs/{self._iter_id}_{method}_gif.gif"
+                out_names.append(f_name)
+
+        gif_path = f"gifs/{self._iter_id}{f'_{self._out_count * (self._out_count > 0)}'}_{method}_gif.gif"
 
         with imageio.get_writer(f'{gif_path}', mode='I') as writer:
-            for filename in names:
+            for filename in out_names:
                 image = imageio.v3.imread(filename)
                 writer.append_data(image)
 
         self._logger.info(f"Saved gif to {gif_path}")
 
-        for filename in set(names):
+        self._out_count += 1
+
+        for filename in list(out_names)[1:-1]:
             os.remove(filename)
 
-    def save_gifs(self):
+    def save_gifs(self, **kwargs):
         """
         Uses generate_animation to save gifs depicting the recourse process.
         :return:
         """
-        self.generate_animation(self.results, 'CLUE')
-        self.generate_animation(self.results, 'Wachter')
+        self.generate_animation(self.results, 'CLUE', kwargs, None)
+        self.generate_animation(self.results, 'Wachter', kwargs, None)
 
     def save_results(self, path=None):
         """
@@ -457,14 +524,20 @@ class Experiment:
             path = f'results/{self._iter_id}.json'
 
         out = {}
-        for i in self.results:
-            out[i] = {}
-            for j in self.results[i]:
-                if j != 'datasets':
-                    out[i][j] = self.results[i][j]
+        for i in self._methods:
+            out[i] = {
+                'means': np.array(self.results[i]['means'], dtype=float).tolist(),
+                'covariances': np.array(self.results[i]['covariances'], dtype=float).tolist(),
+                'clustering': np.array(self.results[i]['clustering'], dtype=float).tolist(),
+                'accuracies': np.array(self.results[i]['accuracies'], dtype=float).tolist(),
+                'f1_scores': np.array(self.results[i]['f1_scores'], dtype=float).tolist(),
+                'pred_data': np.array(self.results[i]['pred_data'], dtype=float).tolist(),
+
+            }
+        out['metadata'] = self.results['metadata']
 
         with open(path, 'w+') as file:
-            file.write(json.dumps(out))
+            json.dump(out, file, indent=2)
 
         self._logger.info(f'Saved results to {path}')
 
@@ -473,8 +546,11 @@ if __name__ == "__main__":
     experiment = Experiment()
     experiment.load_dataset(
         "custom",
-        path='datasets/unimodal_dataset_1.csv', continuous=['feature1', 'feature2'], target='target'
+        path='datasets/unimodal_dataset_2.csv', continuous=['feature1', 'feature2'], target='target'
     )
-    experiment.run_experiment(iterations=7, samples=10)
-    experiment.save_gifs()
+    experiment.run_experiment(iterations=5, samples=10)
+    # experiment.save_gifs()
+    experiment.save_gifs(type='pred_class')
+    # experiment.save_gifs(type='prob')
     print(experiment.results)
+    experiment.save_results()
