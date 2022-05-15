@@ -18,6 +18,8 @@ from carla.recourse_methods import Clue, Wachter
 from carla.models.negative_instances import predict_negative_instances
 from carla.evaluation.benchmark import Benchmark
 from pandas import DataFrame
+from scipy.spatial.distance import pdist
+from sklearn.metrics.pairwise import rbf_kernel
 from sklearn.metrics import f1_score, accuracy_score
 from sklearn.cluster import KMeans
 from sklearn import metrics
@@ -35,7 +37,7 @@ def train_model(dataset: Data, training_params: Dict = None) -> MLModelCatalog:
     :return: Newly trained MLModel object.
     """
     if not training_params:
-        training_params = {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [5]}
+        training_params = {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [20, 20]}
 
     model = MLModelCatalog(
         dataset,
@@ -120,6 +122,8 @@ def get_empty_results() -> Dict:
         'benchmark': [],
         'probabilities': [],
         'pred_data': [],
+        'mmd': [],
+        'disagreement': [],
     }
 
 
@@ -160,7 +164,89 @@ def find_elbow(dataset: Data, n: int = 10):
 
     return KneeLocator(clusters, entropy, S=1.0, curve="convex", direction="decreasing").elbow
 
-    # return ch_metrics.index(np.max(ch_metrics)) + 2
+
+def mmd(df_a: DataFrame, df_b: DataFrame, target: str) -> float:
+    """
+    Computes the Maximum Mean Discrepancy metric using formula from
+    Gretton et al. (2012) https://dl.acm.org/doi/10.5555/2188385.2188410
+    :param df_a: DataFrame of the first distribution
+    :param df_b: DataFrame of the second distribution
+    :param target: str
+    :return: float MMD metric for the two DataFrames
+    """
+    df_a = df_a.loc[df_a[target] == 1].sample(100).drop(target, axis=1)
+    df_b = df_b.loc[df_b[target] == 1].sample(100).drop(target, axis=1)
+
+    df_c = df_a.append(df_b)
+
+    distances = pdist(df_c, 'sqeuclidean')
+
+    sigma = np.sqrt(np.median(distances))
+
+    total = 0
+    len_a = len(df_a)
+    len_b = len(df_b)
+    len_c = len(df_c)
+
+    def get_dist_index(i, j, m):
+        return int(m * i + j - ((i + 2) * (i + 1)) / 2)
+
+    def k_fun(dist, sigma):
+        return np.exp(-(1 / sigma) * dist)
+
+    for i in range(len_a):
+        for j in range(len_b):
+            if i != j:
+                total += k_fun(distances[get_dist_index(i, j, len_c)], sigma) / (len_a ** 2 - len_a)
+                total += k_fun(distances[get_dist_index(i + len_a, j + len_a, len_c)], sigma) / (len_b ** 2 - len_b)
+            total -= 2 * k_fun(distances[get_dist_index(i, j + len_a, len_c)], sigma) / (len_a * len_b)
+
+    return total
+
+
+def mmd_sklearn(df_a: DataFrame, df_b: DataFrame, target: str) -> float:
+    """
+    Computes the Maximum Mean Discrepancy metric using formula from
+    Gretton et al. (2012) https://dl.acm.org/doi/10.5555/2188385.2188410
+    Uses sklearn.metrics.pairwise.rbf_kernel, it is more stable than the
+    manual kernel calculation method.
+    :param df_a: DataFrame of the first distribution
+    :param df_b: DataFrame of the second distribution
+    :param target: str
+    :return: float MMD metric for the two DataFrames
+    """
+    df_a = df_a.loc[df_a[target] == 1].sample(100).drop(target, axis=1)
+    df_b = df_b.loc[df_b[target] == 1].sample(100).drop(target, axis=1)
+
+    len_a = len(df_a)
+    len_b = len(df_b)
+
+    df_c = df_a.append(df_b)
+
+    distances = pdist(df_c, 'sqeuclidean')
+
+    sigma = np.sqrt(np.median(distances))
+
+    total = 0
+
+    total += np.sum(rbf_kernel(df_a, gamma=1 / sigma), axis=None) / (len_a ** 2 - len_a)
+    total += np.sum(rbf_kernel(df_b, gamma=1 / sigma), axis=None) / (len_b ** 2 - len_b)
+    total -= 2 * np.sum(rbf_kernel(df_a, df_b, gamma=1 / sigma), axis=None) / (len_a * len_b)
+
+    return total
+
+
+def disagreement(model_a: MLModelCatalog, model_b: MLModelCatalog, data: Data) -> float:
+    """
+    Calculates the model disagreement pseudo-metric
+    :param model_a: First model to be compared
+    :param model_b: Second model to be compared
+    :param data: The data on which to calculate the metric
+    :return: The model disagreement
+    """
+    pred_a = predict(model_a, data)
+    pred_b = predict(model_b, data)
+    return sum([1 if a != b else 0 for (a, b) in zip(pred_a, pred_b)]) / len(data.df)
 
 
 def get_timestamp():
@@ -242,6 +328,7 @@ class Experiment:
         self._features = []
         self._dataset_name = None
         self._dataset = None
+        self._first_model = None
         self._used_factuals_indices = set()
         self._methods = ['CLUE', 'Wachter']
         self._meshes = {k: [] for k in self._methods}
@@ -301,6 +388,8 @@ class Experiment:
         wachter_result = get_empty_results()
         self.results['Wachter'] = wachter_result
 
+        self._first_model = train_model(self._dataset)
+
         self.results['metadata'] = {'iterations': iterations, 'samples': samples}
 
         # for method in self._methods:
@@ -309,15 +398,15 @@ class Experiment:
         self._logger.info(f'Starting experiment sequence with {iterations} iterations and {samples} samples.')
 
         for i in range(iterations):
-            self._logger.info(f'Experiment iteration [{i+1}/{iterations}]:')
+            self._logger.info(f'Experiment iteration [{i + 1}/{iterations}]:')
 
             clue_model, clue_factuals = self.get_factuals(clue_dataset, sample_num=samples)
             wachter_model, wachter_factuals = self.get_factuals(wachter_dataset, sample_num=samples)
 
             self.update_meshes({'CLUE': clue_model, 'Wachter': wachter_model})
 
-            factuals = pd.merge(clue_factuals, wachter_factuals, how='inner', on=list(self._dataset._df.columns))
-            factuals = pd.merge(factuals, self._dataset._df, how='inner', on=list(self._dataset._df.columns))
+            factuals = pd.merge(clue_factuals, wachter_factuals, how='inner', on=list(self._dataset.df.columns))
+            factuals = pd.merge(factuals, self._dataset.df, how='inner', on=list(self._dataset.df.columns))
             factuals = factuals.drop(index=self._used_factuals_indices, errors='ignore')
 
             print(len(factuals))
@@ -335,6 +424,12 @@ class Experiment:
 
         clue_model, clue_factuals = self.get_factuals(clue_dataset, sample_num=samples)
         wachter_model, wachter_factuals = self.get_factuals(wachter_dataset, sample_num=samples)
+
+        self.results['CLUE']['mmd'].append(mmd_sklearn(self._dataset.df, clue_dataset.df, self._dataset.target))
+        self.results['Wachter']['mmd'].append(mmd_sklearn(self._dataset.df, wachter_dataset.df, self._dataset.target))
+
+        self.results['CLUE']['disagreement'].append(disagreement(self._first_model, clue_model, self._dataset))
+        self.results['Wachter']['disagreement'].append(disagreement(self._first_model, wachter_model, self._dataset))
 
         add_data_statistics(clue_dataset, self.results['CLUE'], clue_model)
         add_data_statistics(wachter_dataset, self.results['Wachter'], wachter_model)
@@ -380,6 +475,10 @@ class Experiment:
 
         results['pred_data'].append(self.get_probability_range(model))
 
+        results['mmd'].append(mmd_sklearn(self._dataset.df, dataset.df, self._dataset.target))
+
+        results['disagreement'].append(disagreement(self._first_model, model, self._dataset))
+
         add_data_statistics(dataset, results, model)
 
         update_dataset(dataset, factuals, counterfactuals)
@@ -405,14 +504,14 @@ class Experiment:
         self._logger.info('Training model.')
         model = train_model(dataset)
         # Predict factuals
-        factuals = predict_negative_instances(model, dataset._df)
+        factuals = predict_negative_instances(model, dataset.df)
         n_factuals = len(factuals)
         # If not enough factuals generated and the max amount of
         # iterations not reached, retrain model and try again
         while m_iter < max_m_iter and n_factuals < sample_num:
-            self._logger.info(f'Not enough factuals found, retraining [{m_iter+1}/{max_m_iter}]')
+            self._logger.info(f'Not enough factuals found, retraining [{m_iter + 1}/{max_m_iter}]')
             model = train_model(dataset)
-            factuals = predict_negative_instances(model, dataset._df)
+            factuals = predict_negative_instances(model, dataset.df)
             n_factuals = len(factuals)
             m_iter += 1
 
@@ -440,7 +539,7 @@ class Experiment:
             pred = models[m].predict(data)
 
             def smoothstep(x):
-                return (1+1000000**(-x+0.5))**(-1)
+                return (1 + 1000000 ** (-x + 0.5)) ** (-1)
 
             self._meshes[m].append((xx, yy, smoothstep(pred)))
 
@@ -460,7 +559,7 @@ class Experiment:
         out_names = []
 
         coloring_type = options.get('type', 'default')
-        
+
         if coloring_type == 'default':
             colors = [df[self._dataset.target] for df in data]
         elif coloring_type == 'pred_class':
@@ -528,10 +627,12 @@ class Experiment:
             out[i] = {
                 'means': np.array(self.results[i]['means'], dtype=float).tolist(),
                 'covariances': np.array(self.results[i]['covariances'], dtype=float).tolist(),
-                'clustering': np.array(self.results[i]['clustering'], dtype=float).tolist(),
+                'clustering': np.array(self.results[i]['clustering'], dtype=int).tolist(),
                 'accuracies': np.array(self.results[i]['accuracies'], dtype=float).tolist(),
                 'f1_scores': np.array(self.results[i]['f1_scores'], dtype=float).tolist(),
                 'pred_data': np.array(self.results[i]['pred_data'], dtype=float).tolist(),
+                'mmd': np.array(self.results[i]['mmd'], dtype=float).tolist(),
+                'disagreement': np.array(self.results[i]['disagreement'], dtype=float).tolist(),
 
             }
         out['metadata'] = self.results['metadata']
@@ -548,7 +649,7 @@ if __name__ == "__main__":
         "custom",
         path='datasets/unimodal_dataset_2.csv', continuous=['feature1', 'feature2'], target='target'
     )
-    experiment.run_experiment(iterations=5, samples=10)
+    experiment.run_experiment(iterations=60, samples=1)
     # experiment.save_gifs()
     experiment.save_gifs(type='pred_class')
     # experiment.save_gifs(type='prob')

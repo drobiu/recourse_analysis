@@ -53,17 +53,17 @@ def train_recourse_method(dataset, model, data_name, method, hyperparams=None):
 
 
 def predict(model, data):
-    pred = model.predict(data._df)
+    pred = model.predict(data.df)
     return np.where(pred > 0.5, 1, 0)
 
 
 def print_f1_score(model, data):
-    score = f1_score(np.array(data._df[data.target]), predict(model, data))
+    score = f1_score(np.array(data.df[data.target]), predict(model, data))
     print(f"F1 score: {score}")
 
 
 def print_accuracy(model, data):
-    score = accuracy_score(np.array(data._df[data.target]), predict(model, data))
+    score = accuracy_score(np.array(data.df[data.target]), predict(model, data))
     print(f"Accuracy score: {score}")
 
 
