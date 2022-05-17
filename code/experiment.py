@@ -591,6 +591,22 @@ class Experiment:
                 plt.savefig(f_name)
                 plt.close()
 
+                if i in [0, 9, 19, 29, 39, 49, 59]:
+                    xx, yy, pred = self._meshes[method][i]
+                    plt.contourf(xx, yy, pred.T[0].reshape(xx.shape[0], xx.shape[0]), levels=10)
+                    plt.scatter(
+                        data[i][features[0]],
+                        data[i][features[1]],
+                        c=np.where(colors[i] > 0.5, '#c78f1e', '#0096f0'),
+                        edgecolors='black'
+                    )
+                    plt.ylim(-0.1, 1.1)
+                    plt.xlim(-0.1, 1.1)
+                    plt.xlabel('faeture 1')
+                    plt.ylabel('feature 2')
+                    plt.savefig(f'images/out_{self._iter_id}_{method}_{i}.png')
+                    plt.close()
+
                 out_names.append(f_name)
 
         gif_path = f"gifs/{self._iter_id}{f'_{self._out_count * (self._out_count > 0)}'}_{method}_gif.gif"
