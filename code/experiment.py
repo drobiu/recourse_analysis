@@ -1,7 +1,9 @@
 import datetime
 import json
+import sys
 import warnings
 from copy import deepcopy
+from functools import reduce
 from typing import Dict, List, Tuple
 
 import carla
@@ -11,6 +13,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import os
+import sys
 
 from carla.data.catalog import CsvCatalog, OnlineCatalog
 from carla import MLModelCatalog, Data, RecourseMethod, MLModel
@@ -29,6 +32,14 @@ from kneed import KneeLocator
 warnings.filterwarnings("ignore")
 
 
+def disable():
+    sys.stdout = open(os.devnull, 'w')
+
+
+def enable():
+    sys.stdout = sys.__stdout__
+
+
 def train_model(dataset: Data, training_params: Dict = None) -> MLModelCatalog:
     """
     Trains a new model on a given dataset.
@@ -37,7 +48,7 @@ def train_model(dataset: Data, training_params: Dict = None) -> MLModelCatalog:
     :return: Newly trained MLModel object.
     """
     if not training_params:
-        training_params = {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [10, 10]}
+        training_params = {"lr": 0.005, "epochs": 2, "batch_size": 20, "hidden_size": [10, 10]}
 
     model = MLModelCatalog(
         dataset,
@@ -69,7 +80,7 @@ def train_recourse_method(
     :param hyperparams: Hyperparameters used by the recourse generator.
     :return: Newly trained recourse generator.
     """
-    if method == 'CLUE':
+    if Clue.__name__ == method:
         if not hyperparams:
             hyperparams = {
                 "data_name": data_name,
@@ -77,7 +88,7 @@ def train_recourse_method(
                 "width": 10,
                 "depth": 3,
                 "latent_dim": 12,
-                "batch_size": 5,
+                "batch_size": 20,
                 "epochs": 3,
                 "lr": 0.001,
                 "early_stop": 20,
@@ -87,10 +98,11 @@ def train_recourse_method(
         rm = Clue(dataset, model, hyperparams)
 
     else:
-        if not hyperparams: hyperparams = {
-            "loss_type": "BCE",
-            "t_max_min": 3 / 60
-        }
+        if not hyperparams:
+            hyperparams = {
+                "loss_type": "BCE",
+                "t_max_min": 3 / 60
+            }
 
         # load a recourse model and pass black box model
         rm = Wachter(model, hyperparams)
@@ -207,7 +219,7 @@ def mmd(df_a: DataFrame, df_b: DataFrame, target: str) -> float:
     return total
 
 
-def mmd_sklearn(df_a: DataFrame, df_b: DataFrame, target: str) -> float:
+def mmd_sklearn(df_a: DataFrame, df_b: DataFrame, target: str, samples=0.1) -> float:
     """
     Computes the Maximum Mean Discrepancy metric using formula from
     Gretton et al. (2012) https://dl.acm.org/doi/10.5555/2188385.2188410
@@ -218,13 +230,15 @@ def mmd_sklearn(df_a: DataFrame, df_b: DataFrame, target: str) -> float:
     :param target: str
     :return: float MMD metric for the two DataFrames
     """
-    df_a = df_a.loc[df_a[target] == 1].sample(100, replace=True).drop(target, axis=1)
-    df_b = df_b.loc[df_b[target] == 1].sample(100, replace=True).drop(target, axis=1)
+    df_a = df_a.loc[df_a[target] == 1]
+    df_a = df_a.sample(max(100, int(len(df_a) * samples))).drop(target, axis=1)
+    df_b = df_b.loc[df_b[target] == 1]
+    df_b = df_b.sample(max(100, int(len(df_b) * samples))).drop(target, axis=1)
 
     len_a = len(df_a)
     len_b = len(df_b)
 
-    df_c = df_a.append(df_b)
+    df_c = df_a.sample(min(1000, len_a)).append(df_b.sample(min(1000, len_b)))
 
     distances = pdist(df_c, 'sqeuclidean')
 
@@ -300,6 +314,15 @@ class CustomBenchmark(Benchmark):
             self._mlmodel.use_pipeline = False  # type: ignore
 
 
+class RecourseMethod:
+    def __init__(self, name, class_type):
+        self.name = name
+        self.type = class_type
+        self.dataset = None
+        self.factuals = None
+        self.model = None
+
+
 class Experiment:
     """
     The experiment class used for setting up, running and evaluating experiments.
@@ -336,11 +359,17 @@ class Experiment:
         self._dataset = None
         self._first_model = None
         self._used_factuals_indices = set()
-        self._methods = ['CLUE', 'Wachter']
-        self._meshes = {k: [] for k in self._methods}
-        self._low_res_meshes = {k: [] for k in self._methods}
+        # self._methods = ['CLUE', 'Wachter']
 
         self.results = {}
+
+        self._generator_options = kwargs.pop('generators', False)
+
+        if self._generator_options:
+            self._methods = {name: RecourseMethod(name, obj['class']) for name, obj in self._generator_options.items()}
+
+        self._meshes = {k: [] for k in self._methods}
+        self._low_res_meshes = {k: [] for k in self._methods}
 
     def load_dataset(self, name, **kwargs):
         """
@@ -387,13 +416,17 @@ class Experiment:
             self._logger.error("Load a dataset before running experiments.")
             return
 
-        clue_dataset = deepcopy(self._dataset)
-        clue_result = get_empty_results()
-        self.results['CLUE'] = clue_result
+        # clue_dataset = deepcopy(self._dataset)
+        # clue_result = get_empty_results()
+        # self.results['CLUE'] = clue_result
+        #
+        # wachter_dataset = deepcopy(self._dataset)
+        # wachter_result = get_empty_results()
+        # self.results['Wachter'] = wachter_result
 
-        wachter_dataset = deepcopy(self._dataset)
-        wachter_result = get_empty_results()
-        self.results['Wachter'] = wachter_result
+        for method in self._methods:
+            self._methods[method].dataset = deepcopy(self._dataset)
+            self.results[method] = get_empty_results()
 
         self._first_model = train_model(self._dataset)
 
@@ -404,14 +437,24 @@ class Experiment:
         for i in range(iterations):
             self._logger.info(f'Experiment iteration [{i + 1}/{iterations}]:')
 
-            clue_model, clue_factuals = self.get_factuals(clue_dataset, sample_num=samples)
-            wachter_model, wachter_factuals = self.get_factuals(wachter_dataset, sample_num=samples)
+            for method, obj in self._methods.items():
+                model, factuals = self.get_factuals(obj.dataset, sample_num=samples)
+                obj.model = model
+                obj.factuals = factuals
+            # clue_model, clue_factuals = self.get_factuals(clue_dataset, sample_num=samples)
+            # wachter_model, wachter_factuals = self.get_factuals(wachter_dataset, sample_num=samples)
 
             if self._options['generate_meshes']:
-                self.update_meshes({'CLUE': clue_model, 'Wachter': wachter_model})
-            self.update_meshes_low_res({'CLUE': clue_model, 'Wachter': wachter_model})
+                self.update_meshes({name: obj.model for name, obj in self._methods.items()})
+                # self.update_meshes({'CLUE': clue_model, 'Wachter': wachter_model})
 
-            factuals = pd.merge(clue_factuals, wachter_factuals, how='inner', on=list(self._dataset.df.columns))
+            self.update_meshes_low_res({name: obj.model for name, obj in self._methods.items()})
+            # self.update_meshes_low_res({'CLUE': clue_model, 'Wachter': wachter_model})
+
+            factuals = reduce(lambda left, right: pd.merge(left, right, on=list(self._dataset.df.columns),
+                              how='inner'), [obj.factuals for obj in self._methods.values()])
+
+            # factuals = pd.merge(clue_factuals, wachter_factuals, how='inner', on=list(self._dataset.df.columns))
             factuals = pd.merge(factuals, self._dataset.df, how='inner', on=list(self._dataset.df.columns))
             factuals = factuals.drop(index=self._used_factuals_indices, errors='ignore')
 
@@ -425,15 +468,17 @@ class Experiment:
 
             self._logger.info(f'Number of factuals: {len(factuals)}')
 
-            self._execute_experiment_iteration('CLUE', clue_dataset, clue_model, factuals, clue_result)
-            self._execute_experiment_iteration('Wachter', wachter_dataset, wachter_model, factuals, wachter_result)
+            for name, obj in self._methods.items():
+                self._execute_experiment_iteration(name, obj.dataset, obj.model, factuals, self.results[name])
+            # self._execute_experiment_iteration('CLUE', clue_dataset, clue_model, factuals, clue_result)
+            # self._execute_experiment_iteration('Wachter', wachter_dataset, wachter_model, factuals, wachter_result)
 
         if self._options['generate_meshes']:
-            self.update_meshes({'CLUE': clue_model, 'Wachter': wachter_model})
-        self.update_meshes_low_res({'CLUE': clue_model, 'Wachter': wachter_model})
+            self.update_meshes({name: obj.model for name, obj in self._methods.items()})
+            # self.update_meshes({'CLUE': clue_model, 'Wachter': wachter_model})
 
-        self._update_last_epoch(clue_dataset, 'CLUE', samples=samples)
-        self._update_last_epoch(wachter_dataset, 'Wachter', samples=samples)
+        self.update_meshes_low_res({name: obj.model for name, obj in self._methods.items()})
+        # self.update_meshes_low_res({'CLUE': clue_model, 'Wachter': wachter_model})
 
         if save_output:
             self.save_results()
@@ -457,16 +502,17 @@ class Experiment:
         :return: The updated Data object.
         """
 
-        if method == 'CLUE':
-            rm = train_recourse_method('CLUE', model, dataset, data_name=self._dataset_name)
-        else:
-            rm = train_recourse_method('Wachter', model)
+        disable()
+        rm = train_recourse_method(self._methods[method].type, model, dataset, data_name=self._dataset_name)
+        enable()
 
         self._logger.info(f'Generating counterfactuals with {method}.')
 
+        disable()
         start = timeit.default_timer()
         counterfactuals = rm.get_counterfactuals(factuals)
         stop = timeit.default_timer()
+        enable()
         self._logger.info(f'Number of counterfactuals: {len(counterfactuals.dropna())}')
 
         benchmark = CustomBenchmark(model, rm, factuals, counterfactuals, stop - start)
@@ -474,11 +520,17 @@ class Experiment:
 
         results['pred_data'].append(self.get_probability_range(model))
 
+        a = timeit.default_timer()
         results['mmd'].append(mmd_sklearn(self._dataset.df, dataset.df, self._dataset.target))
+        b = timeit.default_timer()
+        print(b - a)
 
         results['disagreement'].append(disagreement(self._first_model, model, self._dataset))
 
+        a = timeit.default_timer()
         results['prob_mmd'].append(self.compute_prob_model_shift(self._low_res_meshes[method]))
+        b = timeit.default_timer()
+        print(b - a)
 
         add_data_statistics(dataset, results, model)
 
@@ -503,17 +555,21 @@ class Experiment:
 
         # Train a new MLModel
         self._logger.info('Training model.')
+        disable()
         model = train_model(dataset)
         # Predict factuals
         factuals = predict_negative_instances(model, dataset.df)
         n_factuals = len(factuals)
         # If not enough factuals generated and the max amount of
         # iterations not reached, retrain model and try again
+        enable()
         while m_iter < max_m_iter and n_factuals < sample_num:
             self._logger.info(f'Not enough factuals found, retraining [{m_iter + 1}/{max_m_iter}]')
+            disable()
             model = train_model(dataset)
             factuals = predict_negative_instances(model, dataset.df)
             n_factuals = len(factuals)
+            enable()
             m_iter += 1
 
         return model, factuals
@@ -545,7 +601,7 @@ class Experiment:
             self._meshes[m].append((xx, yy, smoothstep(pred)))
 
     def update_meshes_low_res(self, models):
-        resolution = 5
+        resolution = 10
 
         df = self._dataset.df.drop(self._dataset.target, axis=1)
         ranges = [np.linspace(df[col].min(), df[col].max(), resolution) for col in df.columns.values]
@@ -564,7 +620,9 @@ class Experiment:
             pred_df['pred'] = pred
             pred_df[self._dataset.target] = np.ones(len(coords[0].flatten()))
 
-            self._low_res_meshes[m].append(pred_df.sample(100))
+            size = max(100, int(len(pred_df) * 0.1))
+
+            self._low_res_meshes[m].append(pred_df.sample(size))
 
     def _update_last_epoch(self, dataset, method, samples):
         model, clue_factuals = self.get_factuals(dataset, sample_num=samples)
@@ -613,7 +671,7 @@ class Experiment:
         elif coloring_type == 'prob':
             colors = results[method]['probabilities']
 
-        fpi = options.get('fpi', 3)
+        fpi = options.get('slow', 3)
         mesh = options.get('mesh', True) and self._options['generate_meshes']
         large = options.get('large', True)
 
@@ -706,8 +764,8 @@ class Experiment:
         Uses generate_animation to save gifs depicting the recourse process.
         :return:
         """
-        self.generate_animation(self.results, 'CLUE', kwargs, None)
-        self.generate_animation(self.results, 'Wachter', kwargs, None)
+        for name in self._methods:
+            self.generate_animation(self.results, name, kwargs, None)
 
     def save_results(self, path=None):
         """
@@ -739,14 +797,37 @@ class Experiment:
 
 
 if __name__ == "__main__":
-    experiment = Experiment(generate_meshes=False)
+    experiment = Experiment(
+        generate_meshes=True,
+        generators={
+            'CLUE0': {
+                'class': Clue.__name__,
+                'hyperparameters': {
+                    "train_vae": True,
+                    "width": 10,
+                    "depth": 3,
+                    "latent_dim": 12,
+                    "batch_size": 5,
+                    "epochs": 3,
+                    "lr": 0.001,
+                    "early_stop": 20,
+                }
+            },
+            'CLUE1': {
+                'class': Clue.__name__,
+            },
+            'Wachter': {
+                'class': Wachter.__name__,
+            },
+        }
+    )
     experiment.load_dataset(
-        "compas",
+        "custom",
         path='datasets/unimodal_dataset_1.csv', continuous=['feature1', 'feature2'], target='target'
     )
-    experiment.run_experiment(iterations=50, samples=1)
+    experiment.run_experiment(iterations=5, samples=1)
     # experiment.save_gifs()
-    experiment.save_gifs(type='pred_class')
-    # experiment.save_gifs(type='prob')
-    print(experiment.results)
     experiment.save_results()
+    experiment.save_gifs(type='pred_class', slow=5)
+    # experiment.save_gifs(type='prob')
+    # print(experiment.results)
