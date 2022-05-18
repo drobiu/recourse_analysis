@@ -37,7 +37,7 @@ def train_model(dataset: Data, training_params: Dict = None) -> MLModelCatalog:
     :return: Newly trained MLModel object.
     """
     if not training_params:
-        training_params = {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [20, 20]}
+        training_params = {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [10, 10]}
 
     model = MLModelCatalog(
         dataset,
@@ -70,17 +70,18 @@ def train_recourse_method(
     :return: Newly trained recourse generator.
     """
     if method == 'CLUE':
-        if not hyperparams: hyperparams = {
-            "data_name": data_name,
-            "train_vae": True,
-            "width": 10,
-            "depth": 3,
-            "latent_dim": 12,
-            "batch_size": 5,
-            "epochs": 3,
-            "lr": 0.001,
-            "early_stop": 20,
-        }
+        if not hyperparams:
+            hyperparams = {
+                "data_name": data_name,
+                "train_vae": True,
+                "width": 10,
+                "depth": 3,
+                "latent_dim": 12,
+                "batch_size": 5,
+                "epochs": 3,
+                "lr": 0.001,
+                "early_stop": 20,
+            }
 
         # load a recourse model and pass black box model
         rm = Clue(dataset, model, hyperparams)
@@ -124,6 +125,8 @@ def get_empty_results() -> Dict:
         'pred_data': [],
         'mmd': [],
         'disagreement': [],
+        'model_mmd': [],
+        'prob_mmd': [],
     }
 
 
@@ -174,8 +177,8 @@ def mmd(df_a: DataFrame, df_b: DataFrame, target: str) -> float:
     :param target: str
     :return: float MMD metric for the two DataFrames
     """
-    df_a = df_a.loc[df_a[target] == 1].sample(100).drop(target, axis=1)
-    df_b = df_b.loc[df_b[target] == 1].sample(100).drop(target, axis=1)
+    df_a = df_a.loc[df_a[target] == 1].sample(100, replace=True).drop(target, axis=1)
+    df_b = df_b.loc[df_b[target] == 1].sample(100, replace=True).drop(target, axis=1)
 
     df_c = df_a.append(df_b)
 
@@ -215,8 +218,8 @@ def mmd_sklearn(df_a: DataFrame, df_b: DataFrame, target: str) -> float:
     :param target: str
     :return: float MMD metric for the two DataFrames
     """
-    df_a = df_a.loc[df_a[target] == 1].sample(100).drop(target, axis=1)
-    df_b = df_b.loc[df_b[target] == 1].sample(100).drop(target, axis=1)
+    df_a = df_a.loc[df_a[target] == 1].sample(100, replace=True).drop(target, axis=1)
+    df_b = df_b.loc[df_b[target] == 1].sample(100, replace=True).drop(target, axis=1)
 
     len_a = len(df_a)
     len_b = len(df_b)
@@ -318,12 +321,15 @@ class Experiment:
         Uses generate_animation to automatically generate gifs of the recourse for both generators.
     """
 
-    def __init__(self):
+    def __init__(self, **kwargs):
 
         self._iter_id = get_timestamp()
         self._data_path = 'datasets/bimodal_dataset_1.csv'
         self._logger = carla.get_logger(Experiment.__name__)
         self._out_count = 0
+        self._options = {
+            'generate_meshes': kwargs.get('generate_meshes', True)
+        }
 
         self._features = []
         self._dataset_name = None
@@ -332,6 +338,7 @@ class Experiment:
         self._used_factuals_indices = set()
         self._methods = ['CLUE', 'Wachter']
         self._meshes = {k: [] for k in self._methods}
+        self._low_res_meshes = {k: [] for k in self._methods}
 
         self.results = {}
 
@@ -392,9 +399,6 @@ class Experiment:
 
         self.results['metadata'] = {'iterations': iterations, 'samples': samples}
 
-        # for method in self._methods:
-        #     self.results[method]['datasets'].append(self._dataset.df)
-
         self._logger.info(f'Starting experiment sequence with {iterations} iterations and {samples} samples.')
 
         for i in range(iterations):
@@ -403,7 +407,9 @@ class Experiment:
             clue_model, clue_factuals = self.get_factuals(clue_dataset, sample_num=samples)
             wachter_model, wachter_factuals = self.get_factuals(wachter_dataset, sample_num=samples)
 
-            self.update_meshes({'CLUE': clue_model, 'Wachter': wachter_model})
+            if self._options['generate_meshes']:
+                self.update_meshes({'CLUE': clue_model, 'Wachter': wachter_model})
+            self.update_meshes_low_res({'CLUE': clue_model, 'Wachter': wachter_model})
 
             factuals = pd.merge(clue_factuals, wachter_factuals, how='inner', on=list(self._dataset.df.columns))
             factuals = pd.merge(factuals, self._dataset.df, how='inner', on=list(self._dataset.df.columns))
@@ -422,19 +428,12 @@ class Experiment:
             self._execute_experiment_iteration('CLUE', clue_dataset, clue_model, factuals, clue_result)
             self._execute_experiment_iteration('Wachter', wachter_dataset, wachter_model, factuals, wachter_result)
 
-        clue_model, clue_factuals = self.get_factuals(clue_dataset, sample_num=samples)
-        wachter_model, wachter_factuals = self.get_factuals(wachter_dataset, sample_num=samples)
+        if self._options['generate_meshes']:
+            self.update_meshes({'CLUE': clue_model, 'Wachter': wachter_model})
+        self.update_meshes_low_res({'CLUE': clue_model, 'Wachter': wachter_model})
 
-        self.results['CLUE']['mmd'].append(mmd_sklearn(self._dataset.df, clue_dataset.df, self._dataset.target))
-        self.results['Wachter']['mmd'].append(mmd_sklearn(self._dataset.df, wachter_dataset.df, self._dataset.target))
-
-        self.results['CLUE']['disagreement'].append(disagreement(self._first_model, clue_model, self._dataset))
-        self.results['Wachter']['disagreement'].append(disagreement(self._first_model, wachter_model, self._dataset))
-
-        add_data_statistics(clue_dataset, self.results['CLUE'], clue_model)
-        add_data_statistics(wachter_dataset, self.results['Wachter'], wachter_model)
-
-        self.update_meshes({'CLUE': clue_model, 'Wachter': wachter_model})
+        self._update_last_epoch(clue_dataset, 'CLUE', samples=samples)
+        self._update_last_epoch(wachter_dataset, 'Wachter', samples=samples)
 
         if save_output:
             self.save_results()
@@ -478,6 +477,8 @@ class Experiment:
         results['mmd'].append(mmd_sklearn(self._dataset.df, dataset.df, self._dataset.target))
 
         results['disagreement'].append(disagreement(self._first_model, model, self._dataset))
+
+        results['prob_mmd'].append(self.compute_prob_model_shift(self._low_res_meshes[method]))
 
         add_data_statistics(dataset, results, model)
 
@@ -543,6 +544,51 @@ class Experiment:
 
             self._meshes[m].append((xx, yy, smoothstep(pred)))
 
+    def update_meshes_low_res(self, models):
+        resolution = 5
+
+        df = self._dataset.df.drop(self._dataset.target, axis=1)
+        ranges = [np.linspace(df[col].min(), df[col].max(), resolution) for col in df.columns.values]
+
+        for m in self._methods:
+            coords = np.meshgrid(*ranges)
+
+            pred_df = DataFrame()
+
+            for col, data in zip(df.columns.values, coords):
+                pred_df[col] = data.flatten()
+
+            # data = np.column_stack(tuple(*(coord.flatten() for coord in coords)))
+
+            pred = models[m].predict(pred_df)
+            pred_df['pred'] = pred
+            pred_df[self._dataset.target] = np.ones(len(coords[0].flatten()))
+
+            self._low_res_meshes[m].append(pred_df.sample(100))
+
+    def _update_last_epoch(self, dataset, method, samples):
+        model, clue_factuals = self.get_factuals(dataset, sample_num=samples)
+
+        self.results[method]['mmd'].append(mmd_sklearn(self._dataset.df, dataset.df, self._dataset.target))
+
+        self.results[method]['disagreement'].append(disagreement(self._first_model, model, self._dataset))
+
+        self.results[method]['prob_mmd'].append(self.compute_prob_model_shift(self._low_res_meshes[method]))
+
+        add_data_statistics(dataset, self.results[method], model)
+
+    def compute_prob_model_shift(self, meshes):
+        # data_a = zip(meshes[0][0].flatten(), meshes[0][1].flatten(), meshes[0][2].flatten())
+        # df_a = DataFrame(np.array([[a, b, c, 1] for (a, b, c) in data_a]),
+        #                  columns=self._first_model.feature_input_order)
+        #
+        # data_b = zip(meshes[-1][0].flatten(), meshes[-1][1].flatten(), meshes[-1][2].flatten())
+        # df_b = DataFrame(np.array([[a, b, c, 1] for (a, b, c) in data_b]),
+        #                  columns=self._first_model.feature_input_order)
+
+        # return mmd_sklearn(df_a, df_b, 'target')
+        return mmd_sklearn(meshes[0], meshes[-1], self._dataset.target)
+
     def generate_animation(self, results: Dict, method='CLUE', options=None, features=None):
         """
         Generates an animation using data in results for a set recourse method.
@@ -568,30 +614,62 @@ class Experiment:
             colors = results[method]['probabilities']
 
         fpi = options.get('fpi', 3)
-        mesh = options.get('mesh', True)
+        mesh = options.get('mesh', True) and self._options['generate_meshes']
+        large = options.get('large', True)
 
         for i, name in enumerate(names):
             for n in range(fpi):
-                if mesh:
-                    xx, yy, pred = self._meshes[method][i]
-                    plt.contourf(xx, yy, pred.T[0].reshape(xx.shape[0], xx.shape[0]), levels=10)
-                plt.scatter(
-                    data[i][features[0]],
-                    data[i][features[1]],
-                    c=np.where(colors[i] > 0.5, '#c78f1e', '#0096f0'),
-                    edgecolors='black'
-                )
-                plt.text(0.2, -0.2, self._dataset_name, ha='left', va='center')
-                plt.text(1, 1.15, f"Epoch {i}/{results['metadata']['iterations']}", ha='right', va='center')
-                plt.text(0, 1.15, method, ha='left', va='center')
-                plt.text(.8, -0.2, f"{results['metadata']['samples']} samples/epoch", ha='right', va='center')
-                plt.ylim(-0.1, 1.1)
-                plt.xlim(-0.1, 1.1)
-                f_name = f'{name[:-4]}_{n}.png'
-                plt.savefig(f_name)
-                plt.close()
+                if large:
+                    fig = plt.figure(constrained_layout=True, figsize=(13, 6))
+                    axs = fig.subplot_mosaic(
+                        [['left', 'top_middle', 'top_right'], ['left', 'bottom_middle', 'bottom_right']],
+                        gridspec_kw={'width_ratios': [2, 1, 1]})
 
-                if i in [0, 9, 19, 29, 39, 49, 59]:
+                    if mesh:
+                        xx, yy, pred = self._meshes[method][i]
+                        axs['left'].contourf(xx, yy, pred.T[0].reshape(xx.shape[0], xx.shape[0]), levels=10)
+                    axs['left'].scatter(
+                        data[i][features[0]],
+                        data[i][features[1]],
+                        c=np.where(colors[i] > 0.5, '#c78f1e', '#0096f0'),
+                        edgecolors='black'
+                    )
+                    axs['left'].axis(xmin=-0.1, xmax=1.1, ymin=-0.1, ymax=1.1)
+
+                    axs['top_middle'].plot(results[method]['mmd'][:i + 1])
+                    axs['top_middle'].set_title('MMD')
+                    axs['top_right'].plot(results[method]['disagreement'][:i + 1])
+                    axs['top_right'].set_title('Disagreement')
+                    axs['bottom_middle'].plot(results[method]['model_mmd'][:i + 1])
+                    axs['bottom_middle'].set_title('Model MMD')
+                    axs['bottom_right'].plot(results[method]['prob_mmd'][:i + 1])
+                    axs['bottom_right'].set_title('Probability MMD')
+
+                    f_name = f'{name[:-4]}_{n}.png'
+                    fig.savefig(f_name)
+                    plt.close()
+
+                else:
+                    if mesh:
+                        xx, yy, pred = self._meshes[method][i]
+                        plt.contourf(xx, yy, pred.T[0].reshape(xx.shape[0], xx.shape[0]), levels=10)
+                    plt.scatter(
+                        data[i][features[0]],
+                        data[i][features[1]],
+                        c=np.where(colors[i] > 0.5, '#c78f1e', '#0096f0'),
+                        edgecolors='black'
+                    )
+                    plt.text(0.2, -0.2, self._dataset_name, ha='left', va='center')
+                    plt.text(1, 1.15, f"Epoch {i}/{results['metadata']['iterations']}", ha='right', va='center')
+                    plt.text(0, 1.15, method, ha='left', va='center')
+                    plt.text(.8, -0.2, f"{results['metadata']['samples']} samples/epoch", ha='right', va='center')
+                    plt.ylim(-0.1, 1.1)
+                    plt.xlim(-0.1, 1.1)
+                    f_name = f'{name[:-4]}_{n}.png'
+                    plt.savefig(f_name)
+                    plt.close()
+
+                if i in [0, 9, 19, 29, 39, 49, 59] and False:
                     xx, yy, pred = self._meshes[method][i]
                     plt.contourf(xx, yy, pred.T[0].reshape(xx.shape[0], xx.shape[0]), levels=10)
                     plt.scatter(
@@ -649,7 +727,8 @@ class Experiment:
                 'pred_data': np.array(self.results[i]['pred_data'], dtype=float).tolist(),
                 'mmd': np.array(self.results[i]['mmd'], dtype=float).tolist(),
                 'disagreement': np.array(self.results[i]['disagreement'], dtype=float).tolist(),
-
+                'model_mmd': np.array(self.results[i]['model_mmd'], dtype=float).tolist(),
+                'prob_mmd': np.array(self.results[i]['prob_mmd'], dtype=float).tolist(),
             }
         out['metadata'] = self.results['metadata']
 
@@ -660,12 +739,12 @@ class Experiment:
 
 
 if __name__ == "__main__":
-    experiment = Experiment()
+    experiment = Experiment(generate_meshes=False)
     experiment.load_dataset(
-        "custom",
-        path='datasets/unimodal_dataset_2.csv', continuous=['feature1', 'feature2'], target='target'
+        "compas",
+        path='datasets/unimodal_dataset_1.csv', continuous=['feature1', 'feature2'], target='target'
     )
-    experiment.run_experiment(iterations=60, samples=1)
+    experiment.run_experiment(iterations=50, samples=1)
     # experiment.save_gifs()
     experiment.save_gifs(type='pred_class')
     # experiment.save_gifs(type='prob')
