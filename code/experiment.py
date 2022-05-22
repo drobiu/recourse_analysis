@@ -47,21 +47,23 @@ def train_model(dataset: Data, training_params: Dict = None) -> MLModelCatalog:
     :param training_params: The hyperparameters used during training.
     :return: Newly trained MLModel object.
     """
-    if not training_params:
-        training_params = {"lr": 0.005, "epochs": 2, "batch_size": 20, "hidden_size": [10, 10]}
+    hyperparameters = training_params['hyperparameters']
+    if not hyperparameters:
+        if training_params['model_type'] == 'ann':
+            hyperparameters = {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [10, 10]}
 
     model = MLModelCatalog(
         dataset,
-        model_type="ann",
+        model_type=training_params['model_type'],
         load_online=(not isinstance(dataset, CsvCatalog)),
         backend="pytorch"
     )
 
     model.train(
-        learning_rate=training_params["lr"],
-        epochs=training_params["epochs"],
-        batch_size=training_params["batch_size"],
-        hidden_size=training_params["hidden_size"],
+        learning_rate=hyperparameters["lr"],
+        epochs=hyperparameters["epochs"],
+        batch_size=hyperparameters["batch_size"],
+        hidden_size=hyperparameters["hidden_size"],
         force_train=True
     )
 
@@ -219,7 +221,7 @@ def mmd(df_a: DataFrame, df_b: DataFrame, target: str) -> float:
     return total
 
 
-def mmd_sklearn(df_a: DataFrame, df_b: DataFrame, target: str, samples=0.1) -> float:
+def mmd_sklearn(df_a: DataFrame, df_b: DataFrame, target: str = None, samples=0.1) -> float:
     """
     Computes the Maximum Mean Discrepancy metric using formula from
     Gretton et al. (2012) https://dl.acm.org/doi/10.5555/2188385.2188410
@@ -230,15 +232,18 @@ def mmd_sklearn(df_a: DataFrame, df_b: DataFrame, target: str, samples=0.1) -> f
     :param target: str
     :return: float MMD metric for the two DataFrames
     """
-    df_a = df_a.loc[df_a[target] == 1]
-    df_a = df_a.sample(max(100, int(len(df_a) * samples))).drop(target, axis=1)
-    df_b = df_b.loc[df_b[target] == 1]
-    df_b = df_b.sample(max(100, int(len(df_b) * samples))).drop(target, axis=1)
+
+    if target:
+        df_a = df_a.loc[df_a[target] == 1].drop(target, axis=1)
+        df_b = df_b.loc[df_b[target] == 1].drop(target, axis=1)
 
     len_a = len(df_a)
     len_b = len(df_b)
 
-    df_c = df_a.sample(min(1000, len_a)).append(df_b.sample(min(1000, len_b)))
+    df_a = df_a.sample(min(len_a, max(1000, int(len_a * samples))))
+    df_b = df_b.sample(min(len_b, max(1000, int(len_b * samples))))
+
+    df_c = df_a.append(df_b)
 
     distances = pdist(df_c, 'sqeuclidean')
 
@@ -315,9 +320,10 @@ class CustomBenchmark(Benchmark):
 
 
 class RecourseMethod:
-    def __init__(self, name, class_type):
+    def __init__(self, name, class_type, hyperparameters):
         self.name = name
         self.type = class_type
+        self.hyperparameters = hyperparameters
         self.dataset = None
         self.factuals = None
         self.model = None
@@ -359,16 +365,18 @@ class Experiment:
         self._dataset = None
         self._first_model = None
         self._used_factuals_indices = set()
-        # self._methods = ['CLUE', 'Wachter']
 
         self.results = {}
 
+        self._model_options = kwargs.pop('model', False)
         self._generator_options = kwargs.pop('generators', False)
 
         if self._generator_options:
-            self._methods = {name: RecourseMethod(name, obj['class']) for name, obj in self._generator_options.items()}
+            self._methods = {name: RecourseMethod(name, obj['class'], obj['hyperparameters'])
+                             for name, obj in self._generator_options.items()}
 
         self._meshes = {k: [] for k in self._methods}
+        self._low_res_points = None
         self._low_res_meshes = {k: [] for k in self._methods}
 
     def load_dataset(self, name, **kwargs):
@@ -401,8 +409,8 @@ class Experiment:
             dataset = OnlineCatalog(name)
 
         self._dataset_name = name
-        self._features = [*dataset.continuous, *dataset.categorical]
         self._dataset = dataset
+        self._features = dataset.df.drop(self._dataset.target, axis=1).columns.values.tolist()
 
     def run_experiment(self, save_output=False, iterations=35, samples=2):
         """
@@ -416,21 +424,18 @@ class Experiment:
             self._logger.error("Load a dataset before running experiments.")
             return
 
-        # clue_dataset = deepcopy(self._dataset)
-        # clue_result = get_empty_results()
-        # self.results['CLUE'] = clue_result
-        #
-        # wachter_dataset = deepcopy(self._dataset)
-        # wachter_result = get_empty_results()
-        # self.results['Wachter'] = wachter_result
-
         for method in self._methods:
             self._methods[method].dataset = deepcopy(self._dataset)
             self.results[method] = get_empty_results()
 
-        self._first_model = train_model(self._dataset)
+        self._first_model = train_model(self._dataset, self._model_options)
 
-        self.results['metadata'] = {'iterations': iterations, 'samples': samples}
+        self.results['metadata'] = {
+            'iterations': iterations,
+            'samples': samples,
+            'generators': self._generator_options,
+            'model': self._model_options,
+        }
 
         self._logger.info(f'Starting experiment sequence with {iterations} iterations and {samples} samples.')
 
@@ -441,20 +446,16 @@ class Experiment:
                 model, factuals = self.get_factuals(obj.dataset, sample_num=samples)
                 obj.model = model
                 obj.factuals = factuals
-            # clue_model, clue_factuals = self.get_factuals(clue_dataset, sample_num=samples)
-            # wachter_model, wachter_factuals = self.get_factuals(wachter_dataset, sample_num=samples)
 
             if self._options['generate_meshes']:
                 self.update_meshes({name: obj.model for name, obj in self._methods.items()})
-                # self.update_meshes({'CLUE': clue_model, 'Wachter': wachter_model})
 
             self.update_meshes_low_res({name: obj.model for name, obj in self._methods.items()})
-            # self.update_meshes_low_res({'CLUE': clue_model, 'Wachter': wachter_model})
 
             factuals = reduce(lambda left, right: pd.merge(left, right, on=list(self._dataset.df.columns),
-                              how='inner'), [obj.factuals for obj in self._methods.values()])
+                                                           how='inner'),
+                              [obj.factuals for obj in self._methods.values()])
 
-            # factuals = pd.merge(clue_factuals, wachter_factuals, how='inner', on=list(self._dataset.df.columns))
             factuals = pd.merge(factuals, self._dataset.df, how='inner', on=list(self._dataset.df.columns))
             factuals = factuals.drop(index=self._used_factuals_indices, errors='ignore')
 
@@ -470,15 +471,11 @@ class Experiment:
 
             for name, obj in self._methods.items():
                 self._execute_experiment_iteration(name, obj.dataset, obj.model, factuals, self.results[name])
-            # self._execute_experiment_iteration('CLUE', clue_dataset, clue_model, factuals, clue_result)
-            # self._execute_experiment_iteration('Wachter', wachter_dataset, wachter_model, factuals, wachter_result)
 
         if self._options['generate_meshes']:
             self.update_meshes({name: obj.model for name, obj in self._methods.items()})
-            # self.update_meshes({'CLUE': clue_model, 'Wachter': wachter_model})
 
         self.update_meshes_low_res({name: obj.model for name, obj in self._methods.items()})
-        # self.update_meshes_low_res({'CLUE': clue_model, 'Wachter': wachter_model})
 
         if save_output:
             self.save_results()
@@ -503,7 +500,9 @@ class Experiment:
         """
 
         disable()
-        rm = train_recourse_method(self._methods[method].type, model, dataset, data_name=self._dataset_name)
+        rm = train_recourse_method(self._methods[method].type, model, dataset,
+                                   data_name=self._dataset_name, hyperparams=self._methods[method].hyperparameters
+                                   )
         enable()
 
         self._logger.info(f'Generating counterfactuals with {method}.')
@@ -516,7 +515,7 @@ class Experiment:
         self._logger.info(f'Number of counterfactuals: {len(counterfactuals.dropna())}')
 
         benchmark = CustomBenchmark(model, rm, factuals, counterfactuals, stop - start)
-        results['benchmark'].append(benchmark.run_benchmark())
+        results['benchmark'].append(benchmark.run_benchmark().to_json())
 
         results['pred_data'].append(self.get_probability_range(model))
 
@@ -528,11 +527,14 @@ class Experiment:
         results['disagreement'].append(disagreement(self._first_model, model, self._dataset))
 
         a = timeit.default_timer()
-        results['prob_mmd'].append(self.compute_prob_model_shift(self._low_res_meshes[method]))
+        results['model_mmd'].append(self.compute_prob_model_shift(self._low_res_meshes[method]))
         b = timeit.default_timer()
         print(b - a)
 
         add_data_statistics(dataset, results, model)
+
+        results['prob_mmd'].append(mmd_sklearn(DataFrame(results['probabilities'][0]),
+                                               DataFrame(results['probabilities'][-1]), ''))
 
         update_dataset(dataset, factuals, counterfactuals)
 
@@ -556,7 +558,7 @@ class Experiment:
         # Train a new MLModel
         self._logger.info('Training model.')
         disable()
-        model = train_model(dataset)
+        model = train_model(dataset, self._model_options)
         # Predict factuals
         factuals = predict_negative_instances(model, dataset.df)
         n_factuals = len(factuals)
@@ -566,7 +568,7 @@ class Experiment:
         while m_iter < max_m_iter and n_factuals < sample_num:
             self._logger.info(f'Not enough factuals found, retraining [{m_iter + 1}/{max_m_iter}]')
             disable()
-            model = train_model(dataset)
+            model = train_model(dataset, self._model_options)
             factuals = predict_negative_instances(model, dataset.df)
             n_factuals = len(factuals)
             enable()
@@ -601,39 +603,41 @@ class Experiment:
             self._meshes[m].append((xx, yy, smoothstep(pred)))
 
     def update_meshes_low_res(self, models):
-        resolution = 10
+        if not self._low_res_points:
+            resolution = int(np.ceil(10000 ** (1 / len(self._dataset.df.columns))))
 
-        df = self._dataset.df.drop(self._dataset.target, axis=1)
-        ranges = [np.linspace(df[col].min(), df[col].max(), resolution) for col in df.columns.values]
+            df = self._dataset.df.drop(self._dataset.target, axis=1)
+            ranges = [np.linspace(df[col].min(), df[col].max(), resolution) for col in df.columns.values]
+            self._low_res_points = np.meshgrid(*ranges)
 
         for m in self._methods:
-            coords = np.meshgrid(*ranges)
-
             pred_df = DataFrame()
 
-            for col, data in zip(df.columns.values, coords):
+            for col, data in zip(self._features, self._low_res_points):
                 pred_df[col] = data.flatten()
 
             # data = np.column_stack(tuple(*(coord.flatten() for coord in coords)))
 
             pred = models[m].predict(pred_df)
             pred_df['pred'] = pred
-            pred_df[self._dataset.target] = np.ones(len(coords[0].flatten()))
 
-            size = max(100, int(len(pred_df) * 0.1))
+            # size = max(100, int(len(pred_df) * 0.1))
 
-            self._low_res_meshes[m].append(pred_df.sample(size))
+            self._low_res_meshes[m].append(pred_df)
 
     def _update_last_epoch(self, dataset, method, samples):
-        model, clue_factuals = self.get_factuals(dataset, sample_num=samples)
+        model, factuals = self.get_factuals(dataset, sample_num=samples)
 
         self.results[method]['mmd'].append(mmd_sklearn(self._dataset.df, dataset.df, self._dataset.target))
 
         self.results[method]['disagreement'].append(disagreement(self._first_model, model, self._dataset))
 
-        self.results[method]['prob_mmd'].append(self.compute_prob_model_shift(self._low_res_meshes[method]))
+        self.results[method]['model_mmd'].append(self.compute_prob_model_shift(self._low_res_meshes[method]))
 
         add_data_statistics(dataset, self.results[method], model)
+
+        self.results[method]['prob_mmd'].append(mmd_sklearn(DataFrame(self.results[method]['probabilities'][0]),
+                                                            DataFrame(self.results[method]['probabilities'][-1]), ''))
 
     def compute_prob_model_shift(self, meshes):
         # data_a = zip(meshes[0][0].flatten(), meshes[0][1].flatten(), meshes[0][2].flatten())
@@ -645,7 +649,7 @@ class Experiment:
         #                  columns=self._first_model.feature_input_order)
 
         # return mmd_sklearn(df_a, df_b, 'target')
-        return mmd_sklearn(meshes[0], meshes[-1], self._dataset.target)
+        return mmd_sklearn(meshes[0], meshes[-1])
 
     def generate_animation(self, results: Dict, method='CLUE', options=None, features=None):
         """
@@ -698,10 +702,10 @@ class Experiment:
                     axs['top_middle'].set_title('MMD')
                     axs['top_right'].plot(results[method]['disagreement'][:i + 1])
                     axs['top_right'].set_title('Disagreement')
-                    axs['bottom_middle'].plot(results[method]['model_mmd'][:i + 1])
-                    axs['bottom_middle'].set_title('Model MMD')
-                    axs['bottom_right'].plot(results[method]['prob_mmd'][:i + 1])
-                    axs['bottom_right'].set_title('Probability MMD')
+                    axs['bottom_right'].plot(results[method]['model_mmd'][:i + 1])
+                    axs['bottom_right'].set_title('Model MMD')
+                    axs['bottom_middle'].plot(results[method]['prob_mmd'][:i + 1])
+                    axs['bottom_middle'].set_title('Probability MMD')
 
                     f_name = f'{name[:-4]}_{n}.png'
                     fig.savefig(f_name)
@@ -803,6 +807,7 @@ if __name__ == "__main__":
             'CLUE0': {
                 'class': Clue.__name__,
                 'hyperparameters': {
+                    "data_name": "custom",
                     "train_vae": True,
                     "width": 10,
                     "depth": 3,
@@ -813,19 +818,21 @@ if __name__ == "__main__":
                     "early_stop": 20,
                 }
             },
-            'CLUE1': {
-                'class': Clue.__name__,
-            },
             'Wachter': {
                 'class': Wachter.__name__,
+                'hyperparameters': None,
             },
-        }
+        },
+        model={
+            'model_type': 'ann',
+            'hyperparameters': {"lr": 0.005, "epochs": 4, "batch_size": 20, "hidden_size": [10, 20, 10]}
+        },
     )
     experiment.load_dataset(
         "custom",
-        path='datasets/unimodal_dataset_1.csv', continuous=['feature1', 'feature2'], target='target'
+        path='datasets/moons.csv', continuous=['feature1', 'feature2'], target='target'
     )
-    experiment.run_experiment(iterations=5, samples=1)
+    experiment.run_experiment(iterations=20, samples=2)
     # experiment.save_gifs()
     experiment.save_results()
     experiment.save_gifs(type='pred_class', slow=5)
