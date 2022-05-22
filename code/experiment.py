@@ -138,6 +138,7 @@ def get_empty_results() -> Dict:
         'probabilities': [],
         'pred_data': [],
         'mmd': [],
+        'mmd_p_value': [],
         'disagreement': [],
         'model_mmd': [],
         'prob_mmd': [],
@@ -256,6 +257,21 @@ def mmd_sklearn(df_a: DataFrame, df_b: DataFrame, target: str = None, samples=0.
     total -= 2 * np.sum(rbf_kernel(df_a, df_b, gamma=1 / sigma), axis=None) / (len_a * len_b)
 
     return total
+
+
+def mmd_p_value(df_a: DataFrame, df_b: DataFrame, target_mmd, target, iterations=1000):
+    merged = df_a.append(df_b)
+    # merged = merged.loc[merged[target] == 1]
+    ge = 0
+    for i in range(iterations):
+        shuffled = merged.sample(frac=1)
+        len_shuffled = len(shuffled)
+        half_a = shuffled.iloc[:int(len_shuffled/2)]
+        half_b = shuffled.iloc[int(len_shuffled/2):]
+        if mmd_sklearn(half_a, half_b) > target_mmd:
+            ge += 1
+
+    return ge/iterations
 
 
 def disagreement(model_a: MLModelCatalog, model_b: MLModelCatalog, data: Data) -> float:
@@ -522,6 +538,13 @@ class Experiment:
         a = timeit.default_timer()
         results['mmd'].append(mmd_sklearn(self._dataset.df, dataset.df, self._dataset.target))
         b = timeit.default_timer()
+        print(b - a)
+
+        a = timeit.default_timer()
+        results['mmd_p_value'].append(
+            mmd_p_value(self._dataset.df, dataset.df, results['mmd'][-1], self._dataset.target))
+        b = timeit.default_timer()
+        print(results['mmd_p_value'][-1])
         print(b - a)
 
         results['disagreement'].append(disagreement(self._first_model, model, self._dataset))
