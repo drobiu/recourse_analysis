@@ -40,10 +40,11 @@ def enable():
     sys.stdout = sys.__stdout__
 
 
-def train_model(dataset: Data, training_params: Dict = None) -> MLModelCatalog:
+def train_model(dataset: Data, model: MLModelCatalog = None, training_params: Dict = None) -> MLModelCatalog:
     """
     Trains a new model on a given dataset.
     :param dataset: The dataset to train the model on.
+    :param model: If model exists, retrain it.
     :param training_params: The hyperparameters used during training.
     :return: Newly trained MLModel object.
     """
@@ -52,12 +53,13 @@ def train_model(dataset: Data, training_params: Dict = None) -> MLModelCatalog:
         if training_params['model_type'] == 'ann':
             hyperparameters = {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [10, 10]}
 
-    model = MLModelCatalog(
-        dataset,
-        model_type=training_params['model_type'],
-        load_online=(not isinstance(dataset, CsvCatalog)),
-        backend="pytorch"
-    )
+    if not model:
+        model = MLModelCatalog(
+            dataset,
+            model_type=training_params['model_type'],
+            load_online=(not isinstance(dataset, CsvCatalog)),
+            backend="pytorch"
+        )
 
     model.train(
         learning_rate=hyperparameters["lr"],
@@ -244,6 +246,9 @@ def mmd_sklearn(df_a: DataFrame, df_b: DataFrame, target: str = None, samples=0.
     df_a = df_a.sample(min(len_a, max(1000, int(len_a * samples))))
     df_b = df_b.sample(min(len_b, max(1000, int(len_b * samples))))
 
+    len_a = len(df_a)
+    len_b = len(df_b)
+
     df_c = df_a.append(df_b)
 
     distances = pdist(df_c, 'sqeuclidean')
@@ -260,15 +265,15 @@ def mmd_sklearn(df_a: DataFrame, df_b: DataFrame, target: str = None, samples=0.
 
 
 def mmd_p_value(df_a: DataFrame, df_b: DataFrame, target_mmd, target, iterations=1000):
-    merged = df_a.append(df_b)
-    # merged = merged.loc[merged[target] == 1]
+    merged = df_a.append(df_b, ignore_index=True)
+    merged = merged.loc[merged[target] == 1]
     ge = 0
     for i in range(iterations):
         shuffled = merged.sample(frac=1)
         len_shuffled = len(shuffled)
         half_a = shuffled.iloc[:int(len_shuffled/2)]
         half_b = shuffled.iloc[int(len_shuffled/2):]
-        if mmd_sklearn(half_a, half_b) > target_mmd:
+        if mmd_sklearn(half_a, half_b) >= target_mmd:
             ge += 1
 
     return ge/iterations
@@ -444,7 +449,7 @@ class Experiment:
             self._methods[method].dataset = deepcopy(self._dataset)
             self.results[method] = get_empty_results()
 
-        self._first_model = train_model(self._dataset, self._model_options)
+        self._first_model = train_model(self._dataset, training_params=self._model_options)
 
         self.results['metadata'] = {
             'iterations': iterations,
@@ -459,7 +464,7 @@ class Experiment:
             self._logger.info(f'Experiment iteration [{i + 1}/{iterations}]:')
 
             for method, obj in self._methods.items():
-                model, factuals = self.get_factuals(obj.dataset, sample_num=samples)
+                model, factuals = self.get_factuals(obj.dataset, obj.model, sample_num=samples)
                 obj.model = model
                 obj.factuals = factuals
 
@@ -492,6 +497,9 @@ class Experiment:
             self.update_meshes({name: obj.model for name, obj in self._methods.items()})
 
         self.update_meshes_low_res({name: obj.model for name, obj in self._methods.items()})
+
+        for name, obj in self._methods.items():
+            self._update_last_epoch(obj.dataset, obj.model, obj.name, samples)
 
         if save_output:
             self.save_results()
@@ -566,12 +574,14 @@ class Experiment:
 
         return dataset
 
-    def get_factuals(self, dataset: Data, sample_num: int = 5, max_m_iter: int = 3) -> Tuple[MLModel, DataFrame]:
+    def get_factuals(self, dataset: Data, model: MLModelCatalog = None, sample_num: int = 5, max_m_iter: int = 3
+                     ) -> Tuple[MLModel, DataFrame]:
         """
         Computes the factuals as negative target class instances predicted by the model.
         Retrains the model until the prediction yields at least a set amount of
         data points or the max iterations number is reached.
         :param dataset: The dataset to predict the factuals.
+        :param model: If model exists, retrain and use it.
         :param sample_num: Minimal amount of factuals.
         :param max_m_iter: Max iteration number.
         :return: Tuple[MLModel, DataFrame] containing the newly trained model and the factuals.
@@ -581,7 +591,7 @@ class Experiment:
         # Train a new MLModel
         self._logger.info('Training model.')
         disable()
-        model = train_model(dataset, self._model_options)
+        model = train_model(dataset, model, self._model_options)
         # Predict factuals
         factuals = predict_negative_instances(model, dataset.df)
         n_factuals = len(factuals)
@@ -591,7 +601,7 @@ class Experiment:
         while m_iter < max_m_iter and n_factuals < sample_num:
             self._logger.info(f'Not enough factuals found, retraining [{m_iter + 1}/{max_m_iter}]')
             disable()
-            model = train_model(dataset, self._model_options)
+            model = train_model(dataset, model, self._model_options)
             factuals = predict_negative_instances(model, dataset.df)
             n_factuals = len(factuals)
             enable()
@@ -648,8 +658,8 @@ class Experiment:
 
             self._low_res_meshes[m].append(pred_df)
 
-    def _update_last_epoch(self, dataset, method, samples):
-        model, factuals = self.get_factuals(dataset, sample_num=samples)
+    def _update_last_epoch(self, dataset, model, method, samples):
+        model, factuals = self.get_factuals(dataset, model, sample_num=samples)
 
         self.results[method]['mmd'].append(mmd_sklearn(self._dataset.df, dataset.df, self._dataset.target))
 
@@ -853,7 +863,7 @@ if __name__ == "__main__":
     )
     experiment.load_dataset(
         "custom",
-        path='datasets/moons.csv', continuous=['feature1', 'feature2'], target='target'
+        path='datasets/unimodal_dataset_1.csv', continuous=['feature1', 'feature2'], target='target'
     )
     experiment.run_experiment(iterations=20, samples=2)
     # experiment.save_gifs()
