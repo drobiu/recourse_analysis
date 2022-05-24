@@ -1,6 +1,4 @@
-import datetime
 import json
-import sys
 import warnings
 from copy import deepcopy
 from functools import reduce
@@ -13,341 +11,19 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import os
-import sys
 
 from carla.data.catalog import CsvCatalog, OnlineCatalog
-from carla import MLModelCatalog, Data, RecourseMethod, MLModel
+from carla import MLModelCatalog, Data, MLModel
 from carla.recourse_methods import Clue, Wachter
 from carla.models.negative_instances import predict_negative_instances
-from carla.evaluation.benchmark import Benchmark
 from pandas import DataFrame
-from scipy.spatial.distance import pdist
-from sklearn.metrics.pairwise import rbf_kernel
-from sklearn.metrics import f1_score, accuracy_score
-from sklearn.cluster import KMeans
-from sklearn import metrics
-from recourse_util import update_dataset, predict
-from kneed import KneeLocator
+
+from recourse_analysis.metrics import mmd_sklearn, mmd_p_value, disagreement, compute_prob_model_shift
+from recourse_analysis.util import CustomBenchmark, RecourseMethodData, update_dataset, get_timestamp, \
+    train_model, disable, enable, train_recourse_method
+from recourse_analysis.statistics import get_empty_results, add_data_statistics
 
 warnings.filterwarnings("ignore")
-
-
-def disable():
-    sys.stdout = open(os.devnull, 'w')
-
-
-def enable():
-    sys.stdout = sys.__stdout__
-
-
-def train_model(dataset: Data, model: MLModelCatalog = None, training_params: Dict = None) -> MLModelCatalog:
-    """
-    Trains a new model on a given dataset.
-    :param dataset: The dataset to train the model on.
-    :param model: If model exists, retrain it.
-    :param training_params: The hyperparameters used during training.
-    :return: Newly trained MLModel object.
-    """
-    hyperparameters = training_params['hyperparameters']
-    if not hyperparameters:
-        if training_params['model_type'] == 'ann':
-            hyperparameters = {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [10, 10]}
-
-    if not model:
-        model = MLModelCatalog(
-            dataset,
-            model_type=training_params['model_type'],
-            load_online=(not isinstance(dataset, CsvCatalog)),
-            backend="pytorch"
-        )
-
-    model.train(
-        learning_rate=hyperparameters["lr"],
-        epochs=hyperparameters["epochs"],
-        batch_size=hyperparameters["batch_size"],
-        hidden_size=hyperparameters["hidden_size"],
-        force_train=True
-    )
-
-    return model
-
-
-def train_recourse_method(
-        method: str, model: MLModel, dataset=None, data_name=None, hyperparams=None
-) -> RecourseMethod:
-    """
-    Train a new recourse generator object.
-    :param method: Lowercase name of the recourse generator method.
-    :param model: MLModel to train the method on.
-    :param dataset: Optional Data to train the method on.
-    :param data_name: Name of the dataset.
-    :param hyperparams: Hyperparameters used by the recourse generator.
-    :return: Newly trained recourse generator.
-    """
-    if Clue.__name__ == method:
-        if not hyperparams:
-            hyperparams = {
-                "data_name": data_name,
-                "train_vae": True,
-                "width": 10,
-                "depth": 3,
-                "latent_dim": 12,
-                "batch_size": 20,
-                "epochs": 3,
-                "lr": 0.001,
-                "early_stop": 20,
-            }
-
-        # load a recourse model and pass black box model
-        rm = Clue(dataset, model, hyperparams)
-
-    else:
-        if not hyperparams:
-            hyperparams = {
-                "loss_type": "BCE",
-                "t_max_min": 3 / 60
-            }
-
-        # load a recourse model and pass black box model
-        rm = Wachter(model, hyperparams)
-
-    return rm
-
-
-def draw(data: DataFrame, features: List, target: str):
-    """
-    Draw the data using pyplot scatterplot.
-    :param data: Data to be plotted.
-    :param features: List of data feature names.
-    :param target: Target class.
-    """
-    plt.scatter(data[features[0]], data[features[1]], c=data[target])
-    plt.show()
-
-
-def get_empty_results() -> Dict:
-    """
-    Generate a Dict for storing experiment results in.
-    """
-    return {
-        'datasets': [],
-        'means': [],
-        'covariances': [],
-        'clustering': [],
-        'accuracies': [],
-        'f1_scores': [],
-        'benchmark': [],
-        'probabilities': [],
-        'pred_data': [],
-        'mmd': [],
-        'mmd_p_value': [],
-        'disagreement': [],
-        'model_mmd': [],
-        'prob_mmd': [],
-    }
-
-
-def add_data_statistics(dataset: Data, results: Dict, model: MLModelCatalog = None):
-    """
-    Append the newest experiment statistics to the results Dict.
-    :param model: Current MLModel.
-    :param dataset: Current dataset object.
-    :param results: Results Dict.
-    """
-    results['datasets'].append(dataset.df)
-    results['means'].append(dataset._df[dataset.continuous].mean().to_numpy())
-    results['covariances'].append(dataset._df[dataset.continuous].cov().to_numpy())
-    results['clustering'].append(find_elbow(dataset))
-    results['accuracies'].append(accuracy_score(np.array(dataset._df[dataset.target]), predict(model, dataset)))
-    results['f1_scores'].append(f1_score(np.array(dataset._df[dataset.target]), predict(model, dataset)))
-    results['probabilities'].append(model.predict(dataset.df).flatten())
-
-
-def find_elbow(dataset: Data, n: int = 10):
-    """
-    Find the amount of clusters existing in the dataset using the Caliński-Harabasz
-    elbow finding metric in KMeans clustering.
-    :param dataset: Current dataset.
-    :param n: Number of clusters to consider.
-    :return: Calculated number of clusters.
-    """
-    ch_metrics = []
-    x = dataset.df[dataset.continuous]
-    clusters = []
-    entropy = []
-
-    for i in range(2, n):
-        model = KMeans(n_clusters=i, random_state=1).fit(x)
-        clusters.append(i)
-        entropy.append(model.inertia_)
-        ch_metrics.append(metrics.calinski_harabasz_score(x, model.labels_))
-
-    return KneeLocator(clusters, entropy, S=1.0, curve="convex", direction="decreasing").elbow
-
-
-def mmd(df_a: DataFrame, df_b: DataFrame, target: str) -> float:
-    """
-    Computes the Maximum Mean Discrepancy metric using formula from
-    Gretton et al. (2012) https://dl.acm.org/doi/10.5555/2188385.2188410
-    :param df_a: DataFrame of the first distribution
-    :param df_b: DataFrame of the second distribution
-    :param target: str
-    :return: float MMD metric for the two DataFrames
-    """
-    df_a = df_a.loc[df_a[target] == 1].sample(100, replace=True).drop(target, axis=1)
-    df_b = df_b.loc[df_b[target] == 1].sample(100, replace=True).drop(target, axis=1)
-
-    df_c = df_a.append(df_b)
-
-    distances = pdist(df_c, 'sqeuclidean')
-
-    sigma = np.sqrt(np.median(distances))
-
-    total = 0
-    len_a = len(df_a)
-    len_b = len(df_b)
-    len_c = len(df_c)
-
-    def get_dist_index(i, j, m):
-        return int(m * i + j - ((i + 2) * (i + 1)) / 2)
-
-    def k_fun(dist, sigma):
-        return np.exp(-(1 / sigma) * dist)
-
-    for i in range(len_a):
-        for j in range(len_b):
-            if i != j:
-                total += k_fun(distances[get_dist_index(i, j, len_c)], sigma) / (len_a ** 2 - len_a)
-                total += k_fun(distances[get_dist_index(i + len_a, j + len_a, len_c)], sigma) / (len_b ** 2 - len_b)
-            total -= 2 * k_fun(distances[get_dist_index(i, j + len_a, len_c)], sigma) / (len_a * len_b)
-
-    return total
-
-
-def mmd_sklearn(df_a: DataFrame, df_b: DataFrame, target: str = None, samples=0.1) -> float:
-    """
-    Computes the Maximum Mean Discrepancy metric using formula from
-    Gretton et al. (2012) https://dl.acm.org/doi/10.5555/2188385.2188410
-    Uses sklearn.metrics.pairwise.rbf_kernel, it is more stable than the
-    manual kernel calculation method.
-    :param df_a: DataFrame of the first distribution
-    :param df_b: DataFrame of the second distribution
-    :param target: str
-    :return: float MMD metric for the two DataFrames
-    """
-
-    if target:
-        df_a = df_a.loc[df_a[target] == 1].drop(target, axis=1)
-        df_b = df_b.loc[df_b[target] == 1].drop(target, axis=1)
-
-    len_a = len(df_a)
-    len_b = len(df_b)
-
-    df_a = df_a.sample(min(len_a, max(1000, int(len_a * samples))))
-    df_b = df_b.sample(min(len_b, max(1000, int(len_b * samples))))
-
-    len_a = len(df_a)
-    len_b = len(df_b)
-
-    df_c = df_a.append(df_b)
-
-    distances = pdist(df_c, 'sqeuclidean')
-
-    sigma = np.sqrt(np.median(distances))
-
-    total = 0
-
-    total += np.sum(rbf_kernel(df_a, gamma=1 / sigma), axis=None) / (len_a ** 2 - len_a)
-    total += np.sum(rbf_kernel(df_b, gamma=1 / sigma), axis=None) / (len_b ** 2 - len_b)
-    total -= 2 * np.sum(rbf_kernel(df_a, df_b, gamma=1 / sigma), axis=None) / (len_a * len_b)
-
-    return total
-
-
-def mmd_p_value(df_a: DataFrame, df_b: DataFrame, target_mmd, target, iterations=1000):
-    merged = df_a.append(df_b, ignore_index=True)
-    merged = merged.loc[merged[target] == 1]
-    ge = 0
-    for i in range(iterations):
-        shuffled = merged.sample(frac=1)
-        len_shuffled = len(shuffled)
-        half_a = shuffled.iloc[:int(len_shuffled/2)]
-        half_b = shuffled.iloc[int(len_shuffled/2):]
-        if mmd_sklearn(half_a, half_b) >= target_mmd:
-            ge += 1
-
-    return ge/iterations
-
-
-def disagreement(model_a: MLModelCatalog, model_b: MLModelCatalog, data: Data) -> float:
-    """
-    Calculates the model disagreement pseudo-metric
-    :param model_a: First model to be compared
-    :param model_b: Second model to be compared
-    :param data: The data on which to calculate the metric
-    :return: The model disagreement
-    """
-    pred_a = predict(model_a, data)
-    pred_b = predict(model_b, data)
-    return sum([1 if a != b else 0 for (a, b) in zip(pred_a, pred_b)]) / len(data.df)
-
-
-def get_timestamp():
-    """
-    Generates a timestamp for use in experiment identification.
-    """
-    time = datetime.datetime.now()
-    return f"{time.day:02d}{time.hour:02d}{time.minute:02d}"
-
-
-class CustomBenchmark(Benchmark):
-    """
-    Custom benchmark class extending the carla.evaluation.benchmark.Benchmark class
-    allowing for setting the counterfactuals to be benchmarked and the timings
-    in the class constructor.
-
-    Parameters
-    ----------
-    mlmodel: MLModel
-        ML model used by the benchmarking methods.
-    recourse_method: RecourseMethod
-        Recourse method evaluated in the benchmark.
-    factuals: DataFrame
-        Factual instances used in the recourse process.
-    counterfactuals: DataFrame
-        Counterfactual instances generated by recourse_method
-    timer: int
-        Amount of time used by recourse_method to generate the counterfactuals in seconds.
-    """
-
-    def __init__(
-            self,
-            mlmodel: MLModel,
-            recourse_method: RecourseMethod,
-            factuals: DataFrame,
-            counterfactuals: DataFrame,
-            timer: int
-    ):
-        self._mlmodel = mlmodel
-        self._recourse_method = recourse_method
-        self._factuals = factuals.copy()
-        self._counterfactuals = counterfactuals.copy()
-        self._counterfactuals.index = self._factuals.index.copy()
-        self._timer = timer
-
-        # Avoid using scaling and normalizing more than once
-        if isinstance(mlmodel, MLModelCatalog):
-            self._mlmodel.use_pipeline = False  # type: ignore
-
-
-class RecourseMethod:
-    def __init__(self, name, class_type, hyperparameters):
-        self.name = name
-        self.type = class_type
-        self.hyperparameters = hyperparameters
-        self.dataset = None
-        self.factuals = None
-        self.model = None
 
 
 class Experiment:
@@ -374,7 +50,7 @@ class Experiment:
     def __init__(self, **kwargs):
 
         self._iter_id = get_timestamp()
-        self._data_path = 'datasets/bimodal_dataset_1.csv'
+        self._data_path = '../datasets/bimodal_dataset_1.csv'
         self._logger = carla.get_logger(Experiment.__name__)
         self._out_count = 0
         self._options = {
@@ -393,7 +69,7 @@ class Experiment:
         self._generator_options = kwargs.pop('generators', False)
 
         if self._generator_options:
-            self._methods = {name: RecourseMethod(name, obj['class'], obj['hyperparameters'])
+            self._methods = {name: RecourseMethodData(name, obj['class'], obj['hyperparameters'])
                              for name, obj in self._generator_options.items()}
 
         self._meshes = {k: [] for k in self._methods}
@@ -558,7 +234,7 @@ class Experiment:
         results['disagreement'].append(disagreement(self._first_model, model, self._dataset))
 
         a = timeit.default_timer()
-        results['model_mmd'].append(self.compute_prob_model_shift(self._low_res_meshes[method]))
+        results['model_mmd'].append(compute_prob_model_shift(self._low_res_meshes[method]))
         b = timeit.default_timer()
         print(b - a)
 
@@ -568,9 +244,6 @@ class Experiment:
                                                DataFrame(results['probabilities'][-1]), ''))
 
         update_dataset(dataset, factuals, counterfactuals)
-
-        if draw_state:
-            draw(dataset.df, self._features[:2], self._dataset.target)
 
         return dataset
 
@@ -649,12 +322,8 @@ class Experiment:
             for col, data in zip(self._features, self._low_res_points):
                 pred_df[col] = data.flatten()
 
-            # data = np.column_stack(tuple(*(coord.flatten() for coord in coords)))
-
             pred = models[m].predict(pred_df)
             pred_df['pred'] = pred
-
-            # size = max(100, int(len(pred_df) * 0.1))
 
             self._low_res_meshes[m].append(pred_df)
 
@@ -665,24 +334,12 @@ class Experiment:
 
         self.results[method]['disagreement'].append(disagreement(self._first_model, model, self._dataset))
 
-        self.results[method]['model_mmd'].append(self.compute_prob_model_shift(self._low_res_meshes[method]))
+        self.results[method]['model_mmd'].append(compute_prob_model_shift(self._low_res_meshes[method]))
 
         add_data_statistics(dataset, self.results[method], model)
 
         self.results[method]['prob_mmd'].append(mmd_sklearn(DataFrame(self.results[method]['probabilities'][0]),
                                                             DataFrame(self.results[method]['probabilities'][-1]), ''))
-
-    def compute_prob_model_shift(self, meshes):
-        # data_a = zip(meshes[0][0].flatten(), meshes[0][1].flatten(), meshes[0][2].flatten())
-        # df_a = DataFrame(np.array([[a, b, c, 1] for (a, b, c) in data_a]),
-        #                  columns=self._first_model.feature_input_order)
-        #
-        # data_b = zip(meshes[-1][0].flatten(), meshes[-1][1].flatten(), meshes[-1][2].flatten())
-        # df_b = DataFrame(np.array([[a, b, c, 1] for (a, b, c) in data_b]),
-        #                  columns=self._first_model.feature_input_order)
-
-        # return mmd_sklearn(df_a, df_b, 'target')
-        return mmd_sklearn(meshes[0], meshes[-1])
 
     def generate_animation(self, results: Dict, method='CLUE', options=None, features=None):
         """
@@ -863,11 +520,9 @@ if __name__ == "__main__":
     )
     experiment.load_dataset(
         "custom",
-        path='datasets/unimodal_dataset_1.csv', continuous=['feature1', 'feature2'], target='target'
+        path='../datasets/unimodal_dataset_1.csv', continuous=['feature1', 'feature2'], target='target'
     )
     experiment.run_experiment(iterations=20, samples=2)
     # experiment.save_gifs()
     experiment.save_results()
     experiment.save_gifs(type='pred_class', slow=5)
-    # experiment.save_gifs(type='prob')
-    # print(experiment.results)
