@@ -7,6 +7,8 @@ from carla import MLModelCatalog, Data, MLModel, RecourseMethod
 from carla.data.catalog import CsvCatalog
 from carla.recourse_methods import Clue, Wachter
 
+from recourse_analysis.models.ml_model import CustomMLModel
+
 
 def disable():
     sys.stdout = open(os.devnull, 'w')
@@ -38,20 +40,28 @@ def train_model(dataset: Data, model: MLModelCatalog = None, training_params: Di
             hyperparameters = {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [10, 10]}
 
     if not model:
-        model = MLModelCatalog(
+        model = CustomMLModel(
             dataset,
             model_type=training_params['model_type'],
             load_online=(not isinstance(dataset, CsvCatalog)),
             backend="pytorch"
         )
 
-    model.train(
-        learning_rate=hyperparameters["lr"],
-        epochs=hyperparameters["epochs"],
-        batch_size=hyperparameters["batch_size"],
-        hidden_size=hyperparameters["hidden_size"],
-        force_train=True
-    )
+        model.train(
+            learning_rate=hyperparameters["lr"],
+            epochs=hyperparameters["epochs"],
+            batch_size=hyperparameters["batch_size"],
+            hidden_size=hyperparameters["hidden_size"],
+            force_train=True
+        )
+
+    else:
+        model.retrain(
+            learning_rate=hyperparameters["lr"],
+            epochs=hyperparameters["epochs"],
+            batch_size=hyperparameters["batch_size"],
+            hidden_size=hyperparameters["hidden_size"]
+        )
 
     return model
 

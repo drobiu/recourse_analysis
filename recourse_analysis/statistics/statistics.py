@@ -1,8 +1,8 @@
 from typing import Dict
 
 from carla import MLModelCatalog, Data
-from pandas import np
 from sklearn.metrics import accuracy_score, f1_score
+import numpy as np
 
 from recourse_analysis.metrics.metrics import find_elbow
 from recourse_analysis.util.predictions import predict
@@ -22,6 +22,7 @@ def get_empty_results() -> Dict:
         'benchmark': [],
         'probabilities': [],
         'pred_data': [],
+        'cf_pred_data': [],
         'mmd': [],
         'mmd_p_value': [],
         'disagreement': [],

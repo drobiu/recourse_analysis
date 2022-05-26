@@ -59,6 +59,7 @@ class Experiment:
 
         self._features = []
         self._dataset_name = None
+        self._dataset_path = None
         self._dataset = None
         self._first_model = None
         self._used_factuals_indices = set()
@@ -94,9 +95,11 @@ class Experiment:
                 'target': a string containing the name of the target feature of the dataset.
             }
         """
+        print(os.getcwd())
+        path = kwargs.pop('path')
         if name == 'custom':
             dataset = CsvCatalog(
-                file_path=kwargs.pop('path'),
+                file_path=path,
                 categorical=kwargs.pop('categorical', []),
                 continuous=kwargs.pop('continuous', []),
                 immutables=kwargs.pop('immutables', []),
@@ -106,6 +109,7 @@ class Experiment:
             dataset = OnlineCatalog(name)
 
         self._dataset_name = name
+        self._dataset_path = path
         self._dataset = dataset
         self._features = dataset.df.drop(self._dataset.target, axis=1).columns.values.tolist()
 
@@ -114,24 +118,25 @@ class Experiment:
         Runs the experiment using the CLUE and Wachter recourse generators on a set amount of
         epochs and a set amount of counterfactuals per epoch. The experiment uses the dataset
         set by the load_dataset method.
-        :param:
-        TODO: Parameterize the method
         """
         if not self._dataset:
             self._logger.error("Load a dataset before running experiments.")
             return
 
+        self._first_model = train_model(self._dataset, training_params=self._model_options)
+        self._first_model = train_model(self._dataset, training_params=self._model_options, model=self._first_model)
+
         for method in self._methods:
             self._methods[method].dataset = deepcopy(self._dataset)
+            # self._methods[method].model = deepcopy(self._first_model)
             self.results[method] = get_empty_results()
-
-        self._first_model = train_model(self._dataset, training_params=self._model_options)
 
         self.results['metadata'] = {
             'iterations': iterations,
             'samples': samples,
             'generators': self._generator_options,
             'model': self._model_options,
+            'dataset': self._dataset_path,
         }
 
         self._logger.info(f'Starting experiment sequence with {iterations} iterations and {samples} samples.')
@@ -219,17 +224,19 @@ class Experiment:
 
         results['pred_data'].append(self.get_probability_range(model))
 
+        results['cf_pred_data'].extend(model.predict(counterfactuals.dropna()))
+
         a = timeit.default_timer()
-        results['mmd'].append(mmd_sklearn(self._dataset.df, dataset.df, self._dataset.target))
+        results['mmd'].append(mmd_sklearn(self._dataset.df.sample(frac=1), dataset.df, self._dataset.target))
         b = timeit.default_timer()
         print(b - a)
 
-        a = timeit.default_timer()
-        results['mmd_p_value'].append(
-            mmd_p_value(self._dataset.df, dataset.df, results['mmd'][-1], self._dataset.target))
-        b = timeit.default_timer()
-        print(results['mmd_p_value'][-1])
-        print(b - a)
+        # a = timeit.default_timer()
+        # results['mmd_p_value'].append(
+        #     mmd_p_value(self._dataset.df, dataset.df, results['mmd'][-1], self._dataset.target))
+        # b = timeit.default_timer()
+        # print(results['mmd_p_value'][-1])
+        # print(b - a)
 
         results['disagreement'].append(disagreement(self._first_model, model, self._dataset))
 
@@ -336,6 +343,9 @@ class Experiment:
 
         self.results[method]['model_mmd'].append(compute_prob_model_shift(self._low_res_meshes[method]))
 
+        self.results[method]['mmd_p_value'].append(
+            mmd_p_value(self._dataset.df, dataset.df, self.results[method]['mmd'][-1], self._dataset.target))
+
         add_data_statistics(dataset, self.results[method], model)
 
         self.results[method]['prob_mmd'].append(mmd_sklearn(DataFrame(self.results[method]['probabilities'][0]),
@@ -353,7 +363,7 @@ class Experiment:
         if not features:
             features = self._features[:2]
 
-        names = [f"images/{method}{str(n)}_{self._iter_id}.png" for n in range(len(data))]
+        names = [f"../images/{method}{str(n)}_{self._iter_id}.png" for n in range(len(data))]
         out_names = []
 
         coloring_type = options.get('type', 'default')
@@ -439,7 +449,7 @@ class Experiment:
 
                 out_names.append(f_name)
 
-        gif_path = f"gifs/{self._iter_id}{f'_{self._out_count * (self._out_count > 0)}'}_{method}_gif.gif"
+        gif_path = f"../gifs/{self._iter_id}{f'_{self._out_count * (self._out_count > 0)}'}_{method}_gif.gif"
 
         with imageio.get_writer(f'{gif_path}', mode='I') as writer:
             for filename in out_names:
@@ -466,7 +476,7 @@ class Experiment:
         Save the results Dict to a file.
         """
         if not path:
-            path = f'results/{self._iter_id}.json'
+            path = f'../results/{self._iter_id}.json'
 
         out = {}
         for i in self._methods:
@@ -477,10 +487,12 @@ class Experiment:
                 'accuracies': np.array(self.results[i]['accuracies'], dtype=float).tolist(),
                 'f1_scores': np.array(self.results[i]['f1_scores'], dtype=float).tolist(),
                 'pred_data': np.array(self.results[i]['pred_data'], dtype=float).tolist(),
+                'cf_pred_data': np.array(self.results[i]['cf_pred_data'], dtype=float).tolist(),
                 'mmd': np.array(self.results[i]['mmd'], dtype=float).tolist(),
                 'disagreement': np.array(self.results[i]['disagreement'], dtype=float).tolist(),
                 'model_mmd': np.array(self.results[i]['model_mmd'], dtype=float).tolist(),
                 'prob_mmd': np.array(self.results[i]['prob_mmd'], dtype=float).tolist(),
+                'benchmark': self.results[i]['benchmark'],
             }
         out['metadata'] = self.results['metadata']
 
@@ -491,38 +503,76 @@ class Experiment:
 
 
 if __name__ == "__main__":
-    experiment = Experiment(
-        generate_meshes=True,
-        generators={
-            'CLUE0': {
-                'class': Clue.__name__,
-                'hyperparameters': {
-                    "data_name": "custom",
-                    "train_vae": True,
-                    "width": 10,
-                    "depth": 3,
-                    "latent_dim": 12,
-                    "batch_size": 5,
-                    "epochs": 3,
-                    "lr": 0.001,
-                    "early_stop": 20,
-                }
-            },
-            'Wachter': {
-                'class': Wachter.__name__,
-                'hyperparameters': None,
-            },
-        },
-        model={
-            'model_type': 'ann',
-            'hyperparameters': {"lr": 0.005, "epochs": 4, "batch_size": 20, "hidden_size": [10, 20, 10]}
-        },
-    )
-    experiment.load_dataset(
-        "custom",
-        path='../datasets/unimodal_dataset_1.csv', continuous=['feature1', 'feature2'], target='target'
-    )
-    experiment.run_experiment(iterations=20, samples=2)
-    # experiment.save_gifs()
-    experiment.save_results()
-    experiment.save_gifs(type='pred_class', slow=5)
+    generators = {
+                'CLUE': {
+                    'class': Clue.__name__,
+                    'hyperparameters': {
+                        "data_name": "custom",
+                        "train_vae": True,
+                        "width": 10,
+                        "depth": 3,
+                        "latent_dim": 12,
+                        "batch_size": 2,
+                        "epochs": 3,
+                        "lr": 0.001,
+                        "early_stop": 20,
+                    }
+                },
+                'Wachter': {
+                    'class': Wachter.__name__,
+                    'hyperparameters': {
+                        "loss_type": "BCE",
+                        "t_max_min": 5 / 60
+                    },
+                },
+            }
+
+    model = {
+                'model_type': 'ann',
+                'hyperparameters': {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [5]}
+            }
+
+    for i in range(2):
+        experiment = Experiment(
+            generate_meshes=False,
+            generators=generators,
+            model=model,
+        )
+        experiment.load_dataset(
+            "custom",
+            path='../datasets/linearly_separable.csv', continuous=['feature1', 'feature2'], target='target'
+        )
+        experiment.run_experiment(iterations=100, samples=1)
+        # experiment.save_gifs()
+        experiment.save_results()
+        # experiment.save_gifs(type='pred_class', slow=2)
+
+    for i in range(2):
+        experiment = Experiment(
+            generate_meshes=True,
+            generators=generators,
+            model=model,
+        )
+        experiment.load_dataset(
+            "custom",
+            path='../datasets/linearly_separable.csv', continuous=['feature1', 'feature2'], target='target'
+        )
+        experiment.run_experiment(iterations=34, samples=3)
+        # experiment.save_gifs()
+        experiment.save_results()
+        # experiment.save_gifs(type='pred_class', slow=5)
+
+    for i in range(2):
+        experiment = Experiment(
+            generate_meshes=True,
+            generators=generators,
+            model=model,
+        )
+        experiment.load_dataset(
+            "custom",
+            path='../datasets/linearly_separable.csv', continuous=['feature1', 'feature2'], target='target'
+        )
+        experiment.run_experiment(iterations=10, samples=10)
+        # experiment.save_gifs()
+        experiment.save_results()
+        # experiment.save_gifs(type='pred_class', slow=5)

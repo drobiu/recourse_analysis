@@ -75,7 +75,7 @@ def mmd_sklearn(df_a: DataFrame, df_b: DataFrame, target: str = None, samples=0.
     len_a = len(df_a)
     len_b = len(df_b)
 
-    df_c = df_a.append(df_b)
+    # df_c = df_a.append(df_b)
 
     # distances = pdist(df_c, 'sqeuclidean')
     #
