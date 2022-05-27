@@ -51,7 +51,7 @@ def train_model(dataset: Data, model: MLModelCatalog = None, training_params: Di
             learning_rate=hyperparameters["lr"],
             epochs=hyperparameters["epochs"],
             batch_size=hyperparameters["batch_size"],
-            hidden_size=hyperparameters["hidden_size"],
+            hidden_size=hyperparameters.get("hidden_size", []),
             force_train=True
         )
 
@@ -60,7 +60,7 @@ def train_model(dataset: Data, model: MLModelCatalog = None, training_params: Di
             learning_rate=hyperparameters["lr"],
             epochs=hyperparameters["epochs"],
             batch_size=hyperparameters["batch_size"],
-            hidden_size=hyperparameters["hidden_size"]
+            hidden_size=hyperparameters.get("hidden_size", [])
         )
 
     return model
