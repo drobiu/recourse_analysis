@@ -17,6 +17,7 @@ from carla import MLModelCatalog, Data, MLModel
 from carla.recourse_methods import Clue, Wachter
 from carla.models.negative_instances import predict_negative_instances
 from pandas import DataFrame
+from sklearn.model_selection import train_test_split
 
 from recourse_analysis.metrics import mmd_sklearn, mmd_p_value, disagreement, compute_prob_model_shift
 from recourse_analysis.util import CustomBenchmark, RecourseMethodData, update_dataset, get_timestamp, \
@@ -95,7 +96,6 @@ class Experiment:
                 'target': a string containing the name of the target feature of the dataset.
             }
         """
-        print(os.getcwd())
         path = kwargs.pop('path')
         if name == 'custom':
             dataset = CsvCatalog(
@@ -107,6 +107,19 @@ class Experiment:
             )
         else:
             dataset = OnlineCatalog(name)
+            dataset._df = dataset.df.sample(40000)
+            # stratify the test set
+            x_train, x_test, y_train, y_test = train_test_split(
+                dataset.df.drop(dataset.target, axis=1),
+                dataset.df[dataset.target],
+                test_size=0.16,
+                stratify=dataset.df[dataset.target]
+            )
+            x_train[dataset.target] = y_train
+            x_test[dataset.target] = y_test
+            dataset._df = pd.concat([x_train, x_test])
+            dataset._df_train = x_train
+            dataset._df_test = x_test
 
         self._dataset_name = name
         self._dataset_path = path
@@ -270,14 +283,14 @@ class Experiment:
 
         # Train a new MLModel
         self._logger.info('Training model.')
-        disable()
+        # disable()
         model = train_model(dataset, model, self._model_options)
         # Predict factuals
         factuals = predict_negative_instances(model, dataset.df)
         n_factuals = len(factuals)
         # If not enough factuals generated and the max amount of
         # iterations not reached, retrain model and try again
-        enable()
+        # enable()
         while m_iter < max_m_iter and n_factuals < sample_num:
             self._logger.info(f'Not enough factuals found, retraining [{m_iter + 1}/{max_m_iter}]')
             disable()
@@ -492,6 +505,7 @@ class Experiment:
                 'disagreement': np.array(self.results[i]['disagreement'], dtype=float).tolist(),
                 'model_mmd': np.array(self.results[i]['model_mmd'], dtype=float).tolist(),
                 'prob_mmd': np.array(self.results[i]['prob_mmd'], dtype=float).tolist(),
+                'boundary': np.array(self.results[i]['prob_mmd'], dtype=float).tolist(),
                 'benchmark': self.results[i]['benchmark'],
             }
         out['metadata'] = self.results['metadata']
@@ -528,11 +542,11 @@ if __name__ == "__main__":
             }
 
     model = {
-                'model_type': 'ann',
-                'hyperparameters': {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [5]}
+                'model_type': 'linear',
+                'hyperparameters': {"lr": 0.005, "epochs": 4, "batch_size": 1}
             }
 
-    for i in range(2):
+    for i in range(5):
         experiment = Experiment(
             generate_meshes=False,
             generators=generators,
@@ -540,39 +554,140 @@ if __name__ == "__main__":
         )
         experiment.load_dataset(
             "custom",
-            path='../datasets/linearly_separable.csv', continuous=['feature1', 'feature2'], target='target'
+            path='../datasets/skewed_distribution.csv', continuous=['feature1', 'feature2'], target='target'
         )
-        experiment.run_experiment(iterations=100, samples=1)
+        experiment.run_experiment(iterations=10, samples=5)
         # experiment.save_gifs()
         experiment.save_results()
         # experiment.save_gifs(type='pred_class', slow=2)
 
-    for i in range(2):
+    for i in range(5):
         experiment = Experiment(
             generate_meshes=True,
             generators=generators,
-            model=model,
+            model={
+                'model_type': 'ann',
+                'hyperparameters': {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [5]}
+            },
         )
         experiment.load_dataset(
             "custom",
-            path='../datasets/linearly_separable.csv', continuous=['feature1', 'feature2'], target='target'
+            path='../datasets/skewed_distribution.csv', continuous=['feature1', 'feature2'], target='target'
         )
-        experiment.run_experiment(iterations=34, samples=3)
+        experiment.run_experiment(iterations=10, samples=5)
         # experiment.save_gifs()
         experiment.save_results()
         # experiment.save_gifs(type='pred_class', slow=5)
 
-    for i in range(2):
+    for i in range(5):
         experiment = Experiment(
             generate_meshes=True,
+            generators={
+                'CLUE': {
+                    'class': Clue.__name__,
+                    'hyperparameters': {
+                        "data_name": "custom",
+                        "train_vae": True,
+                        "width": 10,
+                        "depth": 3,
+                        "latent_dim": 12,
+                        "batch_size": 2,
+                        "epochs": 3,
+                        "lr": 0.001,
+                        "early_stop": 20,
+                    }
+                },
+                'Wachter': {
+                    'class': Wachter.__name__,
+                    'hyperparameters': {
+                        "loss_type": "BCE",
+                        "t_max_min": 5 / 60
+                    },
+                },
+            },
+            model={
+                'model_type': 'ann',
+                'hyperparameters': {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [10, 10]}
+            },
+        )
+        experiment.load_dataset(
+            "custom",
+            path='../datasets/skewed_distribution.csv', continuous=['feature1', 'feature2'], target='target'
+        )
+        experiment.run_experiment(iterations=10, samples=5)
+        # experiment.save_gifs()
+        experiment.save_results()
+        # experiment.save_gifs(type='pred_class', slow=5)
+
+    for i in range(5):
+        experiment = Experiment(
+            generate_meshes=False,
             generators=generators,
             model=model,
         )
         experiment.load_dataset(
             "custom",
-            path='../datasets/linearly_separable.csv', continuous=['feature1', 'feature2'], target='target'
+            path='../datasets/plus_shaped.csv', continuous=['feature1', 'feature2'], target='target'
         )
-        experiment.run_experiment(iterations=10, samples=10)
+        experiment.run_experiment(iterations=20, samples=5)
+        # experiment.save_gifs()
+        experiment.save_results()
+        # experiment.save_gifs(type='pred_class', slow=2)
+
+    for i in range(5):
+        experiment = Experiment(
+            generate_meshes=True,
+            generators=generators,
+            model={
+                'model_type': 'ann',
+                'hyperparameters': {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [5]}
+            },
+        )
+        experiment.load_dataset(
+            "custom",
+            path='../datasets/plus_shaped.csv', continuous=['feature1', 'feature2'], target='target'
+        )
+        experiment.run_experiment(iterations=20, samples=5)
+        # experiment.save_gifs()
+        experiment.save_results()
+        # experiment.save_gifs(type='pred_class', slow=5)
+
+    for i in range(5):
+        experiment = Experiment(
+            generate_meshes=True,
+            generators={
+                'CLUE': {
+                    'class': Clue.__name__,
+                    'hyperparameters': {
+                        "data_name": "custom",
+                        "train_vae": True,
+                        "width": 10,
+                        "depth": 3,
+                        "latent_dim": 12,
+                        "batch_size": 2,
+                        "epochs": 3,
+                        "lr": 0.001,
+                        "early_stop": 20,
+                    }
+                },
+                'Wachter': {
+                    'class': Wachter.__name__,
+                    'hyperparameters': {
+                        "loss_type": "BCE",
+                        "t_max_min": 5 / 60
+                    },
+                },
+            },
+            model={
+                'model_type': 'ann',
+                'hyperparameters': {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [10, 10]}
+            },
+        )
+        experiment.load_dataset(
+            "custom",
+            path='../datasets/plus_shaped.csv', continuous=['feature1', 'feature2'], target='target'
+        )
+        experiment.run_experiment(iterations=20, samples=5)
         # experiment.save_gifs()
         experiment.save_results()
         # experiment.save_gifs(type='pred_class', slow=5)

@@ -4,7 +4,7 @@ from carla import MLModelCatalog, Data
 from sklearn.metrics import accuracy_score, f1_score
 import numpy as np
 
-from recourse_analysis.metrics.metrics import find_elbow
+from recourse_analysis.metrics.metrics import find_elbow, boundary
 from recourse_analysis.util.predictions import predict
 
 
@@ -28,6 +28,7 @@ def get_empty_results() -> Dict:
         'disagreement': [],
         'model_mmd': [],
         'prob_mmd': [],
+        'boundary': [],
     }
 
 
@@ -45,3 +46,4 @@ def add_data_statistics(dataset: Data, results: Dict, model: MLModelCatalog = No
     results['accuracies'].append(accuracy_score(np.array(dataset.df[dataset.target]), predict(model, dataset)))
     results['f1_scores'].append(f1_score(np.array(dataset.df[dataset.target]), predict(model, dataset)))
     results['probabilities'].append(model.predict(dataset.df).flatten())
+    results['boundary'].append(boundary(dataset, model))
