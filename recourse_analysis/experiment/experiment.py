@@ -53,6 +53,9 @@ class Experiment:
         self._iter_id = get_timestamp()
         self._data_path = '../datasets/bimodal_dataset_1.csv'
         self._logger = carla.get_logger(Experiment.__name__)
+        self._title = kwargs.pop('title', None)
+        self._seed = np.random.get_state()[1][0]
+        np.random.seed(self._seed)
         self._out_count = 0
         self._options = {
             'generate_meshes': kwargs.get('generate_meshes', True)
@@ -150,6 +153,7 @@ class Experiment:
             'generators': self._generator_options,
             'model': self._model_options,
             'dataset': self._dataset_path,
+            'np_seed': int(self._seed),
         }
 
         self._logger.info(f'Starting experiment sequence with {iterations} iterations and {samples} samples.')
@@ -489,7 +493,7 @@ class Experiment:
         Save the results Dict to a file.
         """
         if not path:
-            path = f'../results/{self._iter_id}.json'
+            path = f'../results/{self._iter_id}{"_" + self._title if self._title else ""}.json'
 
         out = {}
         for i in self._methods:
@@ -517,8 +521,9 @@ class Experiment:
 
 
 if __name__ == "__main__":
+    title = 'clue_hyperparameters'
     generators = {
-                'CLUE': {
+                'CLUE_0': {
                     'class': Clue.__name__,
                     'hyperparameters': {
                         "data_name": "custom",
@@ -532,162 +537,81 @@ if __name__ == "__main__":
                         "early_stop": 20,
                     }
                 },
-                'Wachter': {
-                    'class': Wachter.__name__,
+                'CLUE_1': {
+                    'class': Clue.__name__,
                     'hyperparameters': {
-                        "loss_type": "BCE",
-                        "t_max_min": 5 / 60
-                    },
+                        "data_name": "custom",
+                        "train_vae": True,
+                        "width": 10,
+                        "depth": 3,
+                        "latent_dim": 20,
+                        "batch_size": 2,
+                        "epochs": 3,
+                        "lr": 0.001,
+                        "early_stop": 20,
+                    }
+                },
+                'CLUE_2': {
+                    'class': Clue.__name__,
+                    'hyperparameters': {
+                        "data_name": "custom",
+                        "train_vae": True,
+                        "width": 16,
+                        "depth": 8,
+                        "latent_dim": 12,
+                        "batch_size": 2,
+                        "epochs": 3,
+                        "lr": 0.001,
+                        "early_stop": 20,
+                    }
+                },
+                'CLUE_3': {
+                    'class': Clue.__name__,
+                    'hyperparameters': {
+                        "data_name": "custom",
+                        "train_vae": True,
+                        "width": 16,
+                        "depth": 8,
+                        "latent_dim": 20,
+                        "batch_size": 2,
+                        "epochs": 3,
+                        "lr": 0.001,
+                        "early_stop": 20,
+                    }
                 },
             }
 
     model = {
-                'model_type': 'linear',
-                'hyperparameters': {"lr": 0.005, "epochs": 4, "batch_size": 1}
+        'model_type': 'ann',
+        'hyperparameters': {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [10, 10]}
+    }
+
+    dataset_info = {# 'linearly_separable': 100,
+                     # 'skewed_distribution': 50,
+                     # 'balanced_positive_clusters': 100,
+                     'unbalanced_positive_clusters': 100,
+                     # 'overlapping': 100,
+                     # 'plus_shaped': 100
+                    }
+
+    for name in dataset_info:
+        for generator in generators:
+            curr_gen = {
+                f'{generator}_0': deepcopy(generators[generator]),
+                f'{generator}_1': deepcopy(generators[generator]).update({'lr': 0.005, 'epochs': 5}),
             }
-
-    for i in range(5):
-        experiment = Experiment(
-            generate_meshes=False,
-            generators=generators,
-            model=model,
-        )
-        experiment.load_dataset(
-            "custom",
-            path='../datasets/skewed_distribution.csv', continuous=['feature1', 'feature2'], target='target'
-        )
-        experiment.run_experiment(iterations=10, samples=5)
-        # experiment.save_gifs()
-        experiment.save_results()
-        # experiment.save_gifs(type='pred_class', slow=2)
-
-    for i in range(5):
-        experiment = Experiment(
-            generate_meshes=True,
-            generators=generators,
-            model={
-                'model_type': 'ann',
-                'hyperparameters': {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [5]}
-            },
-        )
-        experiment.load_dataset(
-            "custom",
-            path='../datasets/skewed_distribution.csv', continuous=['feature1', 'feature2'], target='target'
-        )
-        experiment.run_experiment(iterations=10, samples=5)
-        # experiment.save_gifs()
-        experiment.save_results()
-        # experiment.save_gifs(type='pred_class', slow=5)
-
-    for i in range(5):
-        experiment = Experiment(
-            generate_meshes=True,
-            generators={
-                'CLUE': {
-                    'class': Clue.__name__,
-                    'hyperparameters': {
-                        "data_name": "custom",
-                        "train_vae": True,
-                        "width": 10,
-                        "depth": 3,
-                        "latent_dim": 12,
-                        "batch_size": 2,
-                        "epochs": 3,
-                        "lr": 0.001,
-                        "early_stop": 20,
-                    }
-                },
-                'Wachter': {
-                    'class': Wachter.__name__,
-                    'hyperparameters': {
-                        "loss_type": "BCE",
-                        "t_max_min": 5 / 60
-                    },
-                },
-            },
-            model={
-                'model_type': 'ann',
-                'hyperparameters': {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [10, 10]}
-            },
-        )
-        experiment.load_dataset(
-            "custom",
-            path='../datasets/skewed_distribution.csv', continuous=['feature1', 'feature2'], target='target'
-        )
-        experiment.run_experiment(iterations=10, samples=5)
-        # experiment.save_gifs()
-        experiment.save_results()
-        # experiment.save_gifs(type='pred_class', slow=5)
-
-    for i in range(5):
-        experiment = Experiment(
-            generate_meshes=False,
-            generators=generators,
-            model=model,
-        )
-        experiment.load_dataset(
-            "custom",
-            path='../datasets/plus_shaped.csv', continuous=['feature1', 'feature2'], target='target'
-        )
-        experiment.run_experiment(iterations=20, samples=5)
-        # experiment.save_gifs()
-        experiment.save_results()
-        # experiment.save_gifs(type='pred_class', slow=2)
-
-    for i in range(5):
-        experiment = Experiment(
-            generate_meshes=True,
-            generators=generators,
-            model={
-                'model_type': 'ann',
-                'hyperparameters': {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [5]}
-            },
-        )
-        experiment.load_dataset(
-            "custom",
-            path='../datasets/plus_shaped.csv', continuous=['feature1', 'feature2'], target='target'
-        )
-        experiment.run_experiment(iterations=20, samples=5)
-        # experiment.save_gifs()
-        experiment.save_results()
-        # experiment.save_gifs(type='pred_class', slow=5)
-
-    for i in range(5):
-        experiment = Experiment(
-            generate_meshes=True,
-            generators={
-                'CLUE': {
-                    'class': Clue.__name__,
-                    'hyperparameters': {
-                        "data_name": "custom",
-                        "train_vae": True,
-                        "width": 10,
-                        "depth": 3,
-                        "latent_dim": 12,
-                        "batch_size": 2,
-                        "epochs": 3,
-                        "lr": 0.001,
-                        "early_stop": 20,
-                    }
-                },
-                'Wachter': {
-                    'class': Wachter.__name__,
-                    'hyperparameters': {
-                        "loss_type": "BCE",
-                        "t_max_min": 5 / 60
-                    },
-                },
-            },
-            model={
-                'model_type': 'ann',
-                'hyperparameters': {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [10, 10]}
-            },
-        )
-        experiment.load_dataset(
-            "custom",
-            path='../datasets/plus_shaped.csv', continuous=['feature1', 'feature2'], target='target'
-        )
-        experiment.run_experiment(iterations=20, samples=5)
-        # experiment.save_gifs()
-        experiment.save_results()
-        # experiment.save_gifs(type='pred_class', slow=5)
+            for i in range(5):
+                experiment = Experiment(
+                    title=f'{title}_{name}',
+                    generate_meshes=True,
+                    generators=generators,
+                    model=model,
+                )
+                experiment.load_dataset(
+                    "custom",
+                    path=f'../datasets/{name}.csv', continuous=['feature1', 'feature2'], target='target'
+                )
+                experiment.run_experiment(iterations=int(1), samples=5)
+                # experiment.save_gifs()
+                experiment.save_results()
+                experiment.save_gifs(type='pred_class')
