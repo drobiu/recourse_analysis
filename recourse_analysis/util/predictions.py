@@ -1,9 +1,13 @@
+from carla import Data
 from sklearn.metrics import f1_score, accuracy_score
 import numpy as np
 
 
-def predict(model, data):
-    pred = model.predict(data.df)
+def predict(model, data: Data, test=False):
+    if test:
+        pred = model.predict(data.df_test)
+    else:
+        pred = model.predict(data.df)
     return np.where(pred > 0.5, 1, 0)
 
 

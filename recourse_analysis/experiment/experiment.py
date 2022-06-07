@@ -73,6 +73,8 @@ class Experiment:
         self._model_options = kwargs.pop('model', False)
         self._generator_options = kwargs.pop('generators', False)
 
+        print(self._generator_options.items())
+
         if self._generator_options:
             self._methods = {name: RecourseMethodData(name, obj['class'], obj['hyperparameters'])
                              for name, obj in self._generator_options.items()}
@@ -433,8 +435,10 @@ class Experiment:
                         xx, yy, pred = self._meshes[method][i]
                         plt.contourf(xx, yy, pred.T[0].reshape(xx.shape[0], xx.shape[0]), levels=10)
                     plt.scatter(
-                        data[i][features[0]],
-                        data[i][features[1]],
+                        # data[i][features[0]],
+                        # data[i][features[1]],
+                        data[i]["DebtRatio"],
+                        data[i]["MonthlyIncome"],
                         c=np.where(colors[i] > 0.5, '#c78f1e', '#0096f0'),
                         edgecolors='black'
                     )
@@ -448,12 +452,12 @@ class Experiment:
                     plt.savefig(f_name)
                     plt.close()
 
-                if i in [0, 9, 19, 29, 39, 49, 59] and False:
+                if i in [0, 19, 39, 59, 79, 99] and False:
                     xx, yy, pred = self._meshes[method][i]
                     plt.contourf(xx, yy, pred.T[0].reshape(xx.shape[0], xx.shape[0]), levels=10)
                     plt.scatter(
-                        data[i][features[0]],
-                        data[i][features[1]],
+                        data[i]["NumberOfTimes90DaysLate"],
+                        data[i]["MonthlyIncome"],
                         c=np.where(colors[i] > 0.5, '#c78f1e', '#0096f0'),
                         edgecolors='black'
                     )
@@ -510,6 +514,7 @@ class Experiment:
                 'model_mmd': np.array(self.results[i]['model_mmd'], dtype=float).tolist(),
                 'prob_mmd': np.array(self.results[i]['prob_mmd'], dtype=float).tolist(),
                 'boundary': np.array(self.results[i]['prob_mmd'], dtype=float).tolist(),
+                'mmd_p_value': np.array(self.results[i]['mmd_p_value'], dtype=float).tolist(),
                 'benchmark': self.results[i]['benchmark'],
             }
         out['metadata'] = self.results['metadata']
@@ -521,97 +526,61 @@ class Experiment:
 
 
 if __name__ == "__main__":
-    title = 'clue_hyperparameters'
+    title = 'gmsc_clue_hyperparameters'
     generators = {
-                'CLUE_0': {
+                'CLUE4': {
                     'class': Clue.__name__,
                     'hyperparameters': {
                         "data_name": "custom",
                         "train_vae": True,
-                        "width": 10,
-                        "depth": 3,
-                        "latent_dim": 12,
-                        "batch_size": 2,
-                        "epochs": 3,
+                        "width": 20,
+                        "depth": 8,
+                        "latent_dim": 16,
+                        "batch_size": 64,
+                        "epochs": 2,
                         "lr": 0.001,
-                        "early_stop": 20,
+                        "early_stop": 10,
                     }
                 },
-                'CLUE_1': {
-                    'class': Clue.__name__,
-                    'hyperparameters': {
-                        "data_name": "custom",
-                        "train_vae": True,
-                        "width": 10,
-                        "depth": 3,
-                        "latent_dim": 20,
-                        "batch_size": 2,
-                        "epochs": 3,
-                        "lr": 0.001,
-                        "early_stop": 20,
-                    }
-                },
-                'CLUE_2': {
+                'CLUE5': {
                     'class': Clue.__name__,
                     'hyperparameters': {
                         "data_name": "custom",
                         "train_vae": True,
                         "width": 16,
-                        "depth": 8,
-                        "latent_dim": 12,
-                        "batch_size": 2,
-                        "epochs": 3,
+                        "depth": 6,
+                        "latent_dim": 10,
+                        "batch_size": 64,
+                        "epochs": 2,
                         "lr": 0.001,
-                        "early_stop": 20,
+                        "early_stop": 10,
                     }
-                },
-                'CLUE_3': {
-                    'class': Clue.__name__,
-                    'hyperparameters': {
-                        "data_name": "custom",
-                        "train_vae": True,
-                        "width": 16,
-                        "depth": 8,
-                        "latent_dim": 20,
-                        "batch_size": 2,
-                        "epochs": 3,
-                        "lr": 0.001,
-                        "early_stop": 20,
-                    }
-                },
+                }
             }
 
     model = {
         'model_type': 'ann',
-        'hyperparameters': {"lr": 0.005, "epochs": 4, "batch_size": 1, "hidden_size": [10, 10]}
+        'hyperparameters': {"lr": 0.005, "epochs": 4, "batch_size": 20, "hidden_size": [15, 10]}
     }
 
-    dataset_info = {# 'linearly_separable': 100,
-                     # 'skewed_distribution': 50,
-                     # 'balanced_positive_clusters': 100,
-                     'unbalanced_positive_clusters': 100,
-                     # 'overlapping': 100,
-                     # 'plus_shaped': 100
-                    }
+    metadata = json.load(open('../datasets/give_me_some_credit_balanced/metadata.json'))
 
-    for name in dataset_info:
-        for generator in generators:
-            curr_gen = {
-                f'{generator}_0': deepcopy(generators[generator]),
-                f'{generator}_1': deepcopy(generators[generator]).update({'lr': 0.005, 'epochs': 5}),
-            }
-            for i in range(5):
-                experiment = Experiment(
-                    title=f'{title}_{name}',
-                    generate_meshes=True,
-                    generators=generators,
-                    model=model,
-                )
-                experiment.load_dataset(
-                    "custom",
-                    path=f'../datasets/{name}.csv', continuous=['feature1', 'feature2'], target='target'
-                )
-                experiment.run_experiment(iterations=int(1), samples=5)
-                # experiment.save_gifs()
-                experiment.save_results()
-                experiment.save_gifs(type='pred_class')
+    for generator in generators:
+        for i in range(5):
+            experiment = Experiment(
+                title=f'{title}_{i}',
+                generate_meshes=False,
+                generators={generator: generators[generator]},
+                model=model,
+            )
+            experiment.load_dataset(
+                "custom",
+                path=f'../datasets/give_me_some_credit_balanced/{metadata["filename"]}',
+                continuous=metadata['continuous'], categorical=metadata['categorical'],
+                immutables=metadata['immutables'], target=metadata['target']
+            )
+
+            experiment.run_experiment(iterations=100, samples=10)
+            # experiment.save_gifs()
+            experiment.save_results()
+            # experiment.save_gifs(type='pred_class')
