@@ -144,9 +144,12 @@ def disagreement(model_a: MLModelCatalog, model_b: MLModelCatalog, data: Data) -
     return sum([1 if a != b else 0 for (a, b) in zip(pred_a, pred_b)]) / len(data.df)
 
 
-def boundary(data: Data, model: MLModel, sample: int = 1000):
-    samples = data.df.sample(min(len(data.df), sample))
-    return np.mean([(p - 0.5)**2 for p in model.predict(samples)])
+def boundary(data: Data, model: MLModel, sample: int = 1000, target_label: int = None):
+    df = data.df
+    if target_label is not None:
+        df = df.loc[df[data.target == target_label]]
+    samples = df.sample(min(len(df), sample))
+    return np.mean([(p - 0.5) ** 2 for p in model.predict(samples)])
 
 
 def compute_prob_model_shift(meshes):

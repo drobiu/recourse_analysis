@@ -24,11 +24,14 @@ def get_empty_results() -> Dict:
         'pred_data': [],
         'cf_pred_data': [],
         'mmd': [],
+        'mmd_positive': [],
+        'mmd_negative': [],
         'mmd_p_value': [],
         'disagreement': [],
         'model_mmd': [],
         'prob_mmd': [],
-        'boundary': [],
+        'boundary_positive': [],
+        'boundary_negative': [],
     }
 
 
@@ -46,4 +49,5 @@ def add_data_statistics(dataset: Data, results: Dict, model: MLModelCatalog = No
     results['accuracies'].append(accuracy_score(np.array(dataset.df_test[dataset.target]), predict(model, dataset, True)))
     results['f1_scores'].append(f1_score(np.array(dataset.df_test[dataset.target]), predict(model, dataset, True)))
     results['probabilities'].append(model.predict(dataset.df_test).flatten())
-    results['boundary'].append(boundary(dataset, model))
+    results['boundary_positive'].append(boundary(dataset, model, target_label=1))
+    results['boundary_negative'].append(boundary(dataset, model, target_label=0))

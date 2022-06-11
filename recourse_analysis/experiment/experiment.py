@@ -243,12 +243,9 @@ class Experiment:
 
         results['pred_data'].append(self.get_probability_range(model))
 
-        results['cf_pred_data'].extend(model.predict(counterfactuals.dropna()))
+        results['cf_pred_data'].extend(model.predict(counterfactuals.dropna()).flatten())
 
-        a = timeit.default_timer()
         results['mmd'].append(mmd_sklearn(self._dataset.df.sample(frac=1), dataset.df, self._dataset.target))
-        b = timeit.default_timer()
-        print(b - a)
 
         # a = timeit.default_timer()
         # results['mmd_p_value'].append(
@@ -463,7 +460,7 @@ class Experiment:
                     )
                     plt.ylim(-0.1, 1.1)
                     plt.xlim(-0.1, 1.1)
-                    plt.xlabel('faeture 1')
+                    plt.xlabel('feature 1')
                     plt.ylabel('feature 2')
                     plt.savefig(f'images/out_{self._iter_id}_{method}_{i}.png')
                     plt.close()
@@ -513,7 +510,8 @@ class Experiment:
                 'disagreement': np.array(self.results[i]['disagreement'], dtype=float).tolist(),
                 'model_mmd': np.array(self.results[i]['model_mmd'], dtype=float).tolist(),
                 'prob_mmd': np.array(self.results[i]['prob_mmd'], dtype=float).tolist(),
-                'boundary': np.array(self.results[i]['prob_mmd'], dtype=float).tolist(),
+                'boundary_positive': np.array(self.results[i]['boundary_positive'], dtype=float).tolist(),
+                'boundary_negative': np.array(self.results[i]['boundary_negative'], dtype=float).tolist(),
                 'mmd_p_value': np.array(self.results[i]['mmd_p_value'], dtype=float).tolist(),
                 'benchmark': self.results[i]['benchmark'],
             }
