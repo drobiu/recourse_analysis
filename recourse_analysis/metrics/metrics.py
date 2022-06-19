@@ -97,11 +97,13 @@ def mmd_p_value(df_a: DataFrame, df_b: DataFrame, target_mmd, target, iterations
     merged = merged.loc[merged[target] == 1]
     ge = 0
     for i in range(iterations):
-        shuffled = merged.sample(frac=1)
+        # shuffled = merged.sample(frac=1)
+        shuffled = merged.iloc[np.random.permutation(len(merged))]
         len_shuffled = len(shuffled)
         half_a = shuffled.iloc[:int(len_shuffled / 2)]
         half_b = shuffled.iloc[int(len_shuffled / 2):]
-        if mmd_sklearn(half_a, half_b) >= target_mmd:
+        mmd_val = mmd_sklearn(half_a, half_b, target=target)
+        if mmd_val >= target_mmd:
             ge += 1
 
     return ge / iterations
@@ -147,7 +149,7 @@ def disagreement(model_a: MLModelCatalog, model_b: MLModelCatalog, data: Data) -
 def boundary(data: Data, model: MLModel, sample: int = 1000, target_label: int = None):
     df = data.df
     if target_label is not None:
-        df = df.loc[df[data.target == target_label]]
+        df = df.loc[df[data.target] == target_label]
     samples = df.sample(min(len(df), sample))
     return np.mean([(p - 0.5) ** 2 for p in model.predict(samples)])
 

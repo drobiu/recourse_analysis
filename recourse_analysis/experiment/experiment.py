@@ -1,4 +1,5 @@
 import json
+import random
 import warnings
 from copy import deepcopy
 from functools import reduce
@@ -12,6 +13,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import os
 
+import torch
 from carla.data.catalog import CsvCatalog, OnlineCatalog
 from carla import MLModelCatalog, Data, MLModel
 from carla.recourse_methods import Clue, Wachter
@@ -51,11 +53,13 @@ class Experiment:
     def __init__(self, **kwargs):
 
         self._iter_id = get_timestamp()
-        self._data_path = '../datasets/bimodal_dataset_1.csv'
         self._logger = carla.get_logger(Experiment.__name__)
         self._title = kwargs.pop('title', None)
-        self._seed = np.random.get_state()[1][0]
+        self._seed = kwargs.pop('seed', np.random.get_state()[1][0])
         np.random.seed(self._seed)
+        random.seed(self._seed)
+        torch.manual_seed(self._seed)
+        torch.set_deterministic(True)
         self._out_count = 0
         self._options = {
             'generate_meshes': kwargs.get('generate_meshes', True)
@@ -247,13 +251,6 @@ class Experiment:
 
         results['mmd'].append(mmd_sklearn(self._dataset.df.sample(frac=1), dataset.df, self._dataset.target))
 
-        # a = timeit.default_timer()
-        # results['mmd_p_value'].append(
-        #     mmd_p_value(self._dataset.df, dataset.df, results['mmd'][-1], self._dataset.target))
-        # b = timeit.default_timer()
-        # print(results['mmd_p_value'][-1])
-        # print(b - a)
-
         results['disagreement'].append(disagreement(self._first_model, model, self._dataset))
 
         a = timeit.default_timer()
@@ -269,6 +266,23 @@ class Experiment:
         update_dataset(dataset, factuals, counterfactuals)
 
         return dataset
+
+    def _update_last_epoch(self, dataset, model, method, samples):
+        model, factuals = self.get_factuals(dataset, model, sample_num=samples)
+
+        self.results[method]['mmd'].append(mmd_sklearn(self._dataset.df, dataset.df, self._dataset.target))
+
+        self.results[method]['disagreement'].append(disagreement(self._first_model, model, self._dataset))
+
+        self.results[method]['model_mmd'].append(compute_prob_model_shift(self._low_res_meshes[method]))
+
+        self.results[method]['mmd_p_value'].append(
+            mmd_p_value(self._dataset.df, dataset.df, self.results[method]['mmd'][-1], self._dataset.target))
+
+        add_data_statistics(dataset, self.results[method], model)
+
+        self.results[method]['prob_mmd'].append(mmd_sklearn(DataFrame(self.results[method]['probabilities'][0]),
+                                                            DataFrame(self.results[method]['probabilities'][-1]), ''))
 
     def get_factuals(self, dataset: Data, model: MLModelCatalog = None, sample_num: int = 5, max_m_iter: int = 3
                      ) -> Tuple[MLModel, DataFrame]:
@@ -329,7 +343,7 @@ class Experiment:
             def smoothstep(x):
                 return (1 + 1000000 ** (-x + 0.5)) ** (-1)
 
-            self._meshes[m].append((xx, yy, smoothstep(pred)))
+            self._meshes[m].append((xx, yy, pred))
 
     def update_meshes_low_res(self, models):
         if not self._low_res_points:
@@ -349,23 +363,6 @@ class Experiment:
             pred_df['pred'] = pred
 
             self._low_res_meshes[m].append(pred_df)
-
-    def _update_last_epoch(self, dataset, model, method, samples):
-        model, factuals = self.get_factuals(dataset, model, sample_num=samples)
-
-        self.results[method]['mmd'].append(mmd_sklearn(self._dataset.df, dataset.df, self._dataset.target))
-
-        self.results[method]['disagreement'].append(disagreement(self._first_model, model, self._dataset))
-
-        self.results[method]['model_mmd'].append(compute_prob_model_shift(self._low_res_meshes[method]))
-
-        self.results[method]['mmd_p_value'].append(
-            mmd_p_value(self._dataset.df, dataset.df, self.results[method]['mmd'][-1], self._dataset.target))
-
-        add_data_statistics(dataset, self.results[method], model)
-
-        self.results[method]['prob_mmd'].append(mmd_sklearn(DataFrame(self.results[method]['probabilities'][0]),
-                                                            DataFrame(self.results[method]['probabilities'][-1]), ''))
 
     def generate_animation(self, results: Dict, method='CLUE', options=None, features=None):
         """
@@ -432,38 +429,36 @@ class Experiment:
                         xx, yy, pred = self._meshes[method][i]
                         plt.contourf(xx, yy, pred.T[0].reshape(xx.shape[0], xx.shape[0]), levels=10)
                     plt.scatter(
-                        # data[i][features[0]],
-                        # data[i][features[1]],
-                        data[i]["DebtRatio"],
-                        data[i]["MonthlyIncome"],
+                        data[i][features[0]],
+                        data[i][features[1]],
                         c=np.where(colors[i] > 0.5, '#c78f1e', '#0096f0'),
                         edgecolors='black'
                     )
                     plt.text(0.2, -0.2, self._dataset_name, ha='left', va='center')
                     plt.text(1, 1.15, f"Epoch {i}/{results['metadata']['iterations']}", ha='right', va='center')
                     plt.text(0, 1.15, method, ha='left', va='center')
-                    plt.text(.8, -0.2, f"{results['metadata']['samples']} samples/epoch", ha='right', va='center')
+                    # plt.text(.8, -0.2, f"{results['metadata']['samples']} samples/epoch", ha='right', va='center')
                     plt.ylim(-0.1, 1.1)
                     plt.xlim(-0.1, 1.1)
                     f_name = f'{name[:-4]}_{n}.png'
                     plt.savefig(f_name)
                     plt.close()
 
-                if i in [0, 19, 39, 59, 79, 99] and False:
-                    xx, yy, pred = self._meshes[method][i]
-                    plt.contourf(xx, yy, pred.T[0].reshape(xx.shape[0], xx.shape[0]), levels=10)
-                    plt.scatter(
-                        data[i]["NumberOfTimes90DaysLate"],
-                        data[i]["MonthlyIncome"],
-                        c=np.where(colors[i] > 0.5, '#c78f1e', '#0096f0'),
-                        edgecolors='black'
-                    )
-                    plt.ylim(-0.1, 1.1)
-                    plt.xlim(-0.1, 1.1)
-                    plt.xlabel('feature 1')
-                    plt.ylabel('feature 2')
-                    plt.savefig(f'images/out_{self._iter_id}_{method}_{i}.png')
-                    plt.close()
+                # if i in [0, 19, 39, 59, 79, 99] and False:
+                #     xx, yy, pred = self._meshes[method][i]
+                #     plt.contourf(xx, yy, pred.T[0].reshape(xx.shape[0], xx.shape[0]), levels=10)
+                #     plt.scatter(
+                #         data[i]["NumberOfTimes90DaysLate"],
+                #         data[i]["MonthlyIncome"],
+                #         c=np.where(colors[i] > 0.5, '#c78f1e', '#0096f0'),
+                #         edgecolors='black'
+                #     )
+                #     plt.ylim(-0.1, 1.1)
+                #     plt.xlim(-0.1, 1.1)
+                #     plt.xlabel('feature 1')
+                #     plt.ylabel('feature 2')
+                #     plt.savefig(f'images/out_{self._iter_id}_{method}_{i}.png')
+                #     plt.close()
 
                 out_names.append(f_name)
 
@@ -524,17 +519,17 @@ class Experiment:
 
 
 if __name__ == "__main__":
-    title = 'gmsc_clue_hyperparameters'
+    title = 'separable_clue_hyperparameters'
     generators = {
                 'CLUE4': {
                     'class': Clue.__name__,
                     'hyperparameters': {
                         "data_name": "custom",
                         "train_vae": True,
-                        "width": 20,
-                        "depth": 8,
-                        "latent_dim": 16,
-                        "batch_size": 64,
+                        "width": 10,
+                        "depth": 3,
+                        "latent_dim": 1,
+                        "batch_size": 5,
                         "epochs": 2,
                         "lr": 0.001,
                         "early_stop": 10,
@@ -545,10 +540,10 @@ if __name__ == "__main__":
                     'hyperparameters': {
                         "data_name": "custom",
                         "train_vae": True,
-                        "width": 16,
-                        "depth": 6,
-                        "latent_dim": 10,
-                        "batch_size": 64,
+                        "width": 10,
+                        "depth": 3,
+                        "latent_dim": 3,
+                        "batch_size": 5,
                         "epochs": 2,
                         "lr": 0.001,
                         "early_stop": 10,
@@ -558,27 +553,30 @@ if __name__ == "__main__":
 
     model = {
         'model_type': 'ann',
-        'hyperparameters': {"lr": 0.005, "epochs": 4, "batch_size": 20, "hidden_size": [15, 10]}
+        'hyperparameters': {"lr": 0.005, "epochs": 4, "batch_size": 2, "hidden_size": [10, 10]}
     }
 
     metadata = json.load(open('../datasets/give_me_some_credit_balanced/metadata.json'))
 
-    for generator in generators:
-        for i in range(5):
-            experiment = Experiment(
-                title=f'{title}_{i}',
-                generate_meshes=False,
-                generators={generator: generators[generator]},
-                model=model,
-            )
-            experiment.load_dataset(
-                "custom",
-                path=f'../datasets/give_me_some_credit_balanced/{metadata["filename"]}',
-                continuous=metadata['continuous'], categorical=metadata['categorical'],
-                immutables=metadata['immutables'], target=metadata['target']
-            )
+    for i in range(5):
+        experiment = Experiment(
+            title=f'{title}_{i}',
+            generate_meshes=False,
+            generators=generators,
+            model=model,
+            seed=1
+        )
+        experiment.load_dataset(
+            "custom",
+            # path=f'../datasets/give_me_some_credit_balanced/{metadata["filename"]}',
+            # continuous=metadata['continuous'], categorical=metadata['categorical'],
+            # immutables=metadata['immutables'], target=metadata['target']
+            path=f'../datasets/plus_shaped.csv',
+            continuous=['feature1', 'feature2'], categorical=[],
+            immutables=[], target='target'
+        )
 
-            experiment.run_experiment(iterations=100, samples=10)
-            # experiment.save_gifs()
-            experiment.save_results()
-            # experiment.save_gifs(type='pred_class')
+        experiment.run_experiment(iterations=10, samples=10)
+        # experiment.save_gifs()
+        experiment.save_results()
+        # experiment.save_gifs(type='pred_class')
