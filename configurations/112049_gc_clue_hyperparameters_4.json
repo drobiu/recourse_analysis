@@ -1,0 +1,36 @@
+{
+  "metadata": {
+    "iterations": 15,
+    "samples": 10,
+    "generators": {
+      "CLUE2": {
+        "class": "Clue",
+        "hyperparameters": {
+          "data_name": "custom",
+          "train_vae": true,
+          "width": 20,
+          "depth": 4,
+          "latent_dim": 16,
+          "batch_size": 64,
+          "epochs": 2,
+          "lr": 0.001,
+          "early_stop": 10
+        }
+      }
+    },
+    "model": {
+      "model_type": "ann",
+      "hyperparameters": {
+        "lr": 0.005,
+        "epochs": 4,
+        "batch_size": 20,
+        "hidden_size": [
+          15,
+          10
+        ]
+      }
+    },
+    "dataset": "../datasets/german_credit_processed.csv",
+    "np_seed": 3469554935
+  }
+}

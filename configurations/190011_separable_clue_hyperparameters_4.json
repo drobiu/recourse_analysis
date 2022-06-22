@@ -1,0 +1,26 @@
+{
+  "metadata": {
+    "iterations": 10,
+    "samples": 10,
+    "generators": {
+      "Wachter": {
+        "class": "Wachter",
+        "hyperparameters": {
+          "data_name": "custom",
+          "loss_type": "BCE",
+          "t_max_min": 0.05
+        }
+      }
+    },
+    "model": {
+      "model_type": "linear",
+      "hyperparameters": {
+        "lr": 0.005,
+        "epochs": 4,
+        "batch_size": 2
+      }
+    },
+    "dataset": "../datasets/linearly_separable.csv",
+    "np_seed": 1
+  }
+}

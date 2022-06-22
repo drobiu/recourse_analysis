@@ -1,0 +1,43 @@
+{
+  "metadata": {
+    "iterations": 15,
+    "samples": 10,
+    "generators": {
+      "CLUE": {
+        "class": "Clue",
+        "hyperparameters": {
+          "data_name": "custom",
+          "train_vae": true,
+          "width": 10,
+          "depth": 3,
+          "latent_dim": 12,
+          "batch_size": 4,
+          "epochs": 2,
+          "lr": 0.001,
+          "early_stop": 10
+        }
+      },
+      "Wachter": {
+        "class": "Wachter",
+        "hyperparameters": {
+          "data_name": "custom",
+          "loss_type": "BCE",
+          "t_max_min": 0.1
+        }
+      }
+    },
+    "model": {
+      "model_type": "ann",
+      "hyperparameters": {
+        "lr": 0.005,
+        "epochs": 4,
+        "batch_size": 2,
+        "hidden_size": [
+          5
+        ]
+      }
+    },
+    "dataset": "../datasets/overlapping.csv",
+    "np_seed": 2147483648
+  }
+}

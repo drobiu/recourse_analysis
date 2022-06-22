@@ -1,0 +1,32 @@
+{
+  "metadata": {
+    "iterations": 10,
+    "samples": 10,
+    "generators": {
+      "CLUE4": {
+        "class": "Clue",
+        "hyperparameters": {
+          "data_name": "custom",
+          "train_vae": true,
+          "width": 10,
+          "depth": 8,
+          "latent_dim": 12,
+          "batch_size": 2,
+          "epochs": 5,
+          "lr": 0.001,
+          "early_stop": 10
+        }
+      }
+    },
+    "model": {
+      "model_type": "linear",
+      "hyperparameters": {
+        "lr": 0.005,
+        "epochs": 4,
+        "batch_size": 2
+      }
+    },
+    "dataset": "../datasets/linearly_separable.csv",
+    "np_seed": 2147483648
+  }
+}

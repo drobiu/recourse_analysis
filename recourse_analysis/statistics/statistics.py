@@ -48,6 +48,6 @@ def add_data_statistics(dataset: Data, results: Dict, model: MLModelCatalog = No
     results['clustering'].append(find_elbow(dataset))
     results['accuracies'].append(accuracy_score(np.array(dataset.df_test[dataset.target]), predict(model, dataset, True)))
     results['f1_scores'].append(f1_score(np.array(dataset.df_test[dataset.target]), predict(model, dataset, True)))
-    results['probabilities'].append(model.predict(dataset.df_test).flatten())
+    results['probabilities'].append(model.predict(dataset.df).flatten())
     results['boundary_positive'].append(boundary(dataset, model, target_label=1))
     results['boundary_negative'].append(boundary(dataset, model, target_label=0))
